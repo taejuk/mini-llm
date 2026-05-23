@@ -1,0 +1,127 @@
+cmake_minimum_required(VERSION 3.18)
+project(paged_attention LANGUAGES CXX CUDA)
+
+find_package(CUDAToolkit REQUIRED)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 17)
+
+set(CMAKE_CUDA_ARCHITECTURES 70)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
+
+add_compile_definitions(WEIGHTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/weights")
+
+# ── vllm 라이브러리 (BlockAllocator + PagedKVCache) ──────────────
+add_library(vllm_lib
+    src/vllm/allocator.cu
+    src/vllm/kv_cache.cu
+)
+target_include_directories(vllm_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(vllm_lib PUBLIC CUDA::cudart)
+
+# ── GPT-2 공용 커널 ──────────────────────────────────────────────
+add_library(gpt2_common_lib
+    src/model/gpt2_common.cu
+)
+target_include_directories(gpt2_common_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(gpt2_common_lib PUBLIC vllm_lib CUDA::cublas)
+
+# ── GPT-2 WMMA (Tensor Core) ─────────────────────────────────────
+add_library(gpt2_wmma_lib
+    src/model/gpt2_wmma.cu
+    src/kernel/wmma_gemm.cu
+)
+target_include_directories(gpt2_wmma_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(gpt2_wmma_lib PUBLIC gpt2_common_lib)
+
+# ── GPT-2 FP32 모델 ──────────────────────────────────────────────
+add_library(gpt2_fp32_lib
+    src/model/gpt2_model.cu
+)
+target_include_directories(gpt2_fp32_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(gpt2_fp32_lib PUBLIC gpt2_common_lib)
+
+# ── Scheduler ────────────────────────────────────────────────────
+# 기존: test에 scheduler.cpp 직접 컴파일
+# 변경: 라이브러리로 분리 → 서버와 테스트가 공유
+add_library(scheduler_lib
+    src/scheduler/scheduler.cpp
+)
+target_include_directories(scheduler_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(scheduler_lib PUBLIC vllm_lib)
+
+# ── HTTP 서버 ─────────────────────────────────────────────────────
+add_library(http_server_lib
+    src/server/http_server.cpp
+)
+target_include_directories(http_server_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+# eventfd, epoll → Linux 커널 기본 제공, 추가 링크 불필요
+
+# ── 서버 실행 파일 ───────────────────────────────────────────────
+# main.cu는 CUDA 코드 없지만 .cu 확장자 → nvcc가 host 코드로 처리
+add_executable(gpt2_server
+    src/main.cu
+)
+target_include_directories(gpt2_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(gpt2_server PRIVATE
+    http_server_lib
+    scheduler_lib
+    gpt2_wmma_lib
+    gpt2_fp32_lib
+)
+
+# ── Unit Tests ───────────────────────────────────────────────────
+enable_testing()
+
+add_executable(test_mpsc_queue
+    test/test_mpsc_queue.cpp
+)
+target_include_directories(test_mpsc_queue PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+add_test(NAME test_mpsc_queue COMMAND test_mpsc_queue)
+
+add_executable(test_allocator
+    test/test_allocator.cu
+)
+target_include_directories(test_allocator PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+target_link_libraries(test_allocator PRIVATE vllm_lib)
+add_test(NAME test_allocator COMMAND test_allocator)
+
+add_executable(test_kv_cache
+    test/test_kv_cache.cu
+)
+target_include_directories(test_kv_cache PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+target_link_libraries(test_kv_cache PRIVATE vllm_lib)
+add_test(NAME test_kv_cache COMMAND test_kv_cache)
+
+add_executable(test_scheduler
+    test/test_scheduler.cu
+)
+target_include_directories(test_scheduler PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+target_link_libraries(test_scheduler PRIVATE scheduler_lib CUDA::cudart)
+add_test(NAME test_scheduler COMMAND test_scheduler)
