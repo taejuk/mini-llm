@@ -10,6 +10,10 @@
 #include "native_gemm.cuh"
 #include "coalescing_gemm.cuh"
 #include "caching_gemm.cuh"
+#include "blocktiling_1d_gemm.cuh"
+#include "blocktiling_2d_gemm.cuh"
+#include "vectorized_gemm.cuh"
+#include "cublas_gemm.cuh"
 
 // ── 행렬 초기화 ────────────────────────────────────────────────
 static void rand_init(float* h, int n) {
@@ -18,16 +22,16 @@ static void rand_init(float* h, int n) {
 }
 
 // ── 커널 벤치마크 ──────────────────────────────────────────────
-typedef void (*GemmFn)(float*, float*, float*, int, int, int);
+typedef void (*GemmFn)(int, int, int, float,const float*,const float*, float,float*);
 
 static float benchmark(GemmFn fn,
-                       float* dA, float* dB, float* dC,
-                       int M, int N, int K,
+                       int M, int N, int K, float alpha, const float *A,
+                       const float *B, float beta, float *C,
                        int warmup, int runs)
 {
     // 워밍업
     for (int i = 0; i < warmup; i++)
-        fn(dA, dB, dC, M, N, K);
+        fn(M, N, K, alpha ,A, B, beta,C);
     cudaDeviceSynchronize();
 
     cudaEvent_t start, stop;
@@ -36,7 +40,7 @@ static float benchmark(GemmFn fn,
 
     cudaEventRecord(start);
     for (int i = 0; i < runs; i++)
-        fn(dA, dB, dC, M, N, K);
+        fn(M, N, K, alpha ,A, B, beta,C);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
 
@@ -106,18 +110,30 @@ int main() {
         cudaMemcpy(dB, hB, K * N * sizeof(float), cudaMemcpyHostToDevice);
 
         int warmup = 3, runs = 10;
-
+        float alpha = 1.0f; float beta = 0.0f;
         // naive
-        float ms = benchmark(naive_gemm, dA, dB, dC, M, N, K, warmup, runs);
+        float ms = benchmark(naive_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
         print_result("naive", ms, M, N, K, peak_gflops, peak_bw_gbs);
 
         // coalescing
-        ms = benchmark(coalescing_gemm, dA, dB, dC, M, N, K, warmup, runs);
+        ms = benchmark(coalescing_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
         print_result("coalescing", ms, M, N, K, peak_gflops, peak_bw_gbs);
 
         // caching
-        ms = benchmark(caching_gemm, dA, dB, dC, M, N, K, warmup, runs);
+        ms = benchmark(caching_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
         print_result("caching", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	
+	ms = benchmark(blocktiling_1d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
+	print_result("blocktiling 1d", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	
+	ms = benchmark(blocktiling_2d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
+        print_result("blocktiling 2d", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	
+	ms = benchmark(vectorized_gemm, M, N, K, alpha, dA, dB, beta,dC, warmup, runs);
+	print_result("vectorized", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	
+	ms = benchmark(cublas_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
+        print_result("cublas", ms, M, N, K, peak_gflops, peak_bw_gbs);
 
         cudaFree(dA); cudaFree(dB); cudaFree(dC);
         free(hA); free(hB); free(hC);

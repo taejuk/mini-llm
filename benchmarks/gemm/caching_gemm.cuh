@@ -2,8 +2,8 @@
 #include <stdio.h>
 #include <math.h>
 #define BLOCKSIZE 32
-__global__ void sgemm_caching(int M, int N, int K, const float *A,
-                            const float *B, float *C)
+__global__ void sgemm_caching(int M, int N, int K, float alpha, const float *A,
+                            const float *B, float beta, float *C)
 {
   __shared__ float sA[BLOCKSIZE*BLOCKSIZE];
   __shared__ float sB[BLOCKSIZE*BLOCKSIZE];
@@ -28,14 +28,15 @@ __global__ void sgemm_caching(int M, int N, int K, const float *A,
             tmp += sA[dotIdx * BLOCKSIZE + threadx] * sB[dotIdx * BLOCKSIZE + thready];
     __syncthreads();
   }
-  C[(cRow * BLOCKSIZE + threadx)*N + cCol * BLOCKSIZE + thready] = tmp;
+  C[(cRow * BLOCKSIZE + threadx)*N + cCol * BLOCKSIZE + thready] = alpha * tmp + beta * C[(cRow * BLOCKSIZE + threadx)*N + cCol * BLOCKSIZE + thready];
 
 }
 
-void caching_gemm(float* A, float* B, float* C, int M, int N, int K) {
+void caching_gemm(int M, int N, int K, float alpha, const float *A,
+                            const float *B, float beta, float *C) {
   dim3 gridDim((M+BLOCKSIZE-1)/BLOCKSIZE, (N+BLOCKSIZE-1)/BLOCKSIZE);
   dim3 blockDim(BLOCKSIZE, BLOCKSIZE);
 
-  sgemm_caching<<<gridDim, blockDim>>>(M, N, K, A, B, C);
+  sgemm_caching<<<gridDim, blockDim>>>(M, N, K, alpha ,A, B, beta,C);
 
 }

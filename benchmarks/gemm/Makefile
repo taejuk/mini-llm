@@ -1,6 +1,6 @@
 NVCC = nvcc
 ARCH     = -arch=sm_70
-FLAGS    = -O3 $(ARCH) -I.
+FLAGS    = -O3 $(ARCH) -I. -lcublas
 TARGET   = gemm_bench
 
 $(TARGET): main.cu native_gemm.cuh coalescing_gemm.cuh caching_gemm.cuh
