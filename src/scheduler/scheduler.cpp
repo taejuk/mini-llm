@@ -81,7 +81,7 @@ bool Scheduler::all_done() const {
 int Scheduler::try_admit() {
     int ret = 0;
     int free_blocks = BlockAllocator::getInstance().get_num_free_blocks();
-    std::cout << "[admit] free_blocks=" << free_blocks << " waiting=" << waiting_.size() << "\n";
+    //std::cout << "[admit] free_blocks=" << free_blocks << " waiting=" << waiting_.size() << "\n";
     free_blocks = free_blocks - blocks_needed_for_running();
     
     while(!waiting_.empty()) {

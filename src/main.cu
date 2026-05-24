@@ -50,6 +50,11 @@ void inference_loop(Scheduler& sched) {
 }
 
 int main() {
+    
+    static constexpr int TOTAL_BLOCKS = 128;
+    BlockAllocator::getInstance(TOTAL_BLOCKS, BLOCK_SIZE, D_MODEL);
+    std::cout << "[main] allocator ready: " << TOTAL_BLOCKS << " blocks\n";
+
     // 1. GPT-2 모델 초기화 (weights 로딩)
     std::cout << "[main] loading weights from " << WEIGHTS_DIR << "\n";
     GPT2ModelWMMA::init(WEIGHTS_DIR, BLOCK_SIZE);
