@@ -26,7 +26,6 @@ __global__ void sgemm_vectorized(int M, int N, int K, float alpha, const float *
   float threadResults[TM][TN] = {0.0f};
   float regA[TM];
   float regB[TN];
-
   for(int bkIdx = 0; bkIdx < K; bkIdx += BK) {
     for (int i = 0; i < (BM * BK) / (numThreads * 4); i++) {
       int pairIdx = threadIdx.x + i * numThreads;
@@ -40,7 +39,6 @@ __global__ void sgemm_vectorized(int M, int N, int K, float alpha, const float *
       sA[(colA4*4 + 2)*BM + rowA] = tmp.z;
       sA[(colA4*4 + 3)*BM + rowA] = tmp.w;
     }
-
     for(int i = 0; i < (BK * BN) / (numThreads * 4); i++) {
       int pairIdx = threadIdx.x + i * numThreads;
       int rowB = pairIdx / (BN / 4);
@@ -53,7 +51,6 @@ __global__ void sgemm_vectorized(int M, int N, int K, float alpha, const float *
     __syncthreads();
     A += BK;
     B += BK * N;
-
     for(int dotIdx = 0; dotIdx < BK; dotIdx++) {
       float4 a0 = reinterpret_cast<float4*>(&sA[dotIdx * BM + threadRow * TM])[0];
       float4 a1 = reinterpret_cast<float4*>(&sA[dotIdx * BM + threadRow * TM+4])[0];
@@ -71,7 +68,6 @@ __global__ void sgemm_vectorized(int M, int N, int K, float alpha, const float *
     }
     __syncthreads();
   }
-
   for (int i = 0; i < TM; i++) {
     float4* c0_ptr = reinterpret_cast<float4*>
                           (&C[(threadRow * TM + i) * N + threadCol * TN]);

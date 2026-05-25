@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <nvtx3/nvToolsExt.h>
 
 #include "native_gemm.cuh"
 #include "coalescing_gemm.cuh"
@@ -27,12 +28,14 @@ typedef void (*GemmFn)(int, int, int, float,const float*,const float*, float,flo
 static float benchmark(GemmFn fn,
                        int M, int N, int K, float alpha, const float *A,
                        const float *B, float beta, float *C,
-                       int warmup, int runs)
+                       int warmup, int runs, const char* name)
 {
     // 워밍업
     for (int i = 0; i < warmup; i++)
         fn(M, N, K, alpha ,A, B, beta,C);
     cudaDeviceSynchronize();
+    
+    nvtxRangePushA(name);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
@@ -43,6 +46,8 @@ static float benchmark(GemmFn fn,
         fn(M, N, K, alpha ,A, B, beta,C);
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
+    
+    nvtxRangePop();
 
     float ms = 0;
     cudaEventElapsedTime(&ms, start, stop);
@@ -54,7 +59,7 @@ static float benchmark(GemmFn fn,
 // ── 결과 출력 ──────────────────────────────────────────────────
 static void print_result(const char* name,
                          float ms, int M, int N, int K,
-                         double peak_gflops, double peak_bw_gbs)
+                         double peak_gflops, double peak_bw_gbs, float standard)
 {
     double flops   = 2.0 * M * N * K;
     double bytes   = (double)(M*K + K*N + M*N) * sizeof(float);
@@ -64,8 +69,8 @@ static void print_result(const char* name,
 
 //    const char* bound = (ai < ridge) ? "Memory Bound" : "Compute Bound";
 
-    printf("%-20s │ %6.2f ms │ %8.1f GFLOPS │ AI=%6.2f (%.0f%%)\n",
-           name, ms, gflops, ai, gflops / peak_gflops * 100.0);
+    printf("%-20s │ %6.2f ms │ %8.1f GFLOPS │ cublas=%.0f%% (%.0f%%)\n",
+           name, ms, gflops, standard / ms * 100, gflops / peak_gflops * 100.0);
 }
 
 int main() {
@@ -83,12 +88,14 @@ int main() {
     printf("─────────────────────────────────────────────────────────────\n");
 
     // 행렬 크기 (M=N=K)
-    const int sizes[] = {256, 512, 1024, 2048, 4096};
+    const int sizes[] = {4096};
     const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
     for (int si = 0; si < n_sizes; si++) {
         int M = sizes[si], N = sizes[si], K = sizes[si];
-
+        char size_label[32];
+	snprintf(size_label, sizeof(size_label), "size=%d", sizes[si]);
+	nvtxRangePushA(size_label);
         printf("\n[M=N=K=%d]\n", M);
         printf("%-20s │ %8s │ %18s │ %10s │ %s\n",
                "Kernel", "Time", "Throughput", "AI", "Status");
@@ -111,29 +118,28 @@ int main() {
 
         int warmup = 3, runs = 10;
         float alpha = 1.0f; float beta = 0.0f;
-        // naive
-        float ms = benchmark(naive_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-        print_result("naive", ms, M, N, K, peak_gflops, peak_bw_gbs);
+        float standard = benchmark(cublas_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs, "cublas");
+	// naive
+        float ms = benchmark(naive_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs,"naive");
+        print_result("naive", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
 
         // coalescing
-        ms = benchmark(coalescing_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-        print_result("coalescing", ms, M, N, K, peak_gflops, peak_bw_gbs);
+        ms = benchmark(coalescing_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs, "coalescing");
+        print_result("coalescing", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
 
         // caching
-        ms = benchmark(caching_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-        print_result("caching", ms, M, N, K, peak_gflops, peak_bw_gbs);
+        ms = benchmark(caching_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs, "caching");
+        print_result("caching", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
 	
-	ms = benchmark(blocktiling_1d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-	print_result("blocktiling 1d", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	ms = benchmark(blocktiling_1d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs, "block tilind 1d");
+	print_result("blocktiling 1d", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
 	
-	ms = benchmark(blocktiling_2d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-        print_result("blocktiling 2d", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	ms = benchmark(blocktiling_2d_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs, "block tiling 2d");
+        print_result("blocktiling 2d", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
 	
-	ms = benchmark(vectorized_gemm, M, N, K, alpha, dA, dB, beta,dC, warmup, runs);
-	print_result("vectorized", ms, M, N, K, peak_gflops, peak_bw_gbs);
-	
-	ms = benchmark(cublas_gemm, M, N, K, alpha, dA, dB, beta, dC, warmup, runs);
-        print_result("cublas", ms, M, N, K, peak_gflops, peak_bw_gbs);
+	ms = benchmark(vectorized_gemm, M, N, K, alpha, dA, dB, beta,dC, warmup, runs, "vectorized");
+	print_result("vectorized", ms, M, N, K, peak_gflops, peak_bw_gbs, standard);
+	nvtxRangePop();
 
         cudaFree(dA); cudaFree(dB); cudaFree(dC);
         free(hA); free(hB); free(hC);
