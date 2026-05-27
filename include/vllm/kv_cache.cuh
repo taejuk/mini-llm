@@ -28,6 +28,8 @@ public:
 
     void append_token_kv_batch(float* new_k, float* new_v, int n);
 
+    void append_qkv_from_interleaved(const float* buf_qkv, int seq_len);
+
     PagedKVCache fork();
 
     void cow_append(float* key_vec, float* value_vec);
