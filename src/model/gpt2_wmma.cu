@@ -135,25 +135,26 @@ static void mha_prefill(cublasHandle_t handle,
 
     // 2) K, V → PagedKVCache 저장
     {
-        float *d_k, *d_v;
-        float* h_qkv = (float*)malloc((size_t)seq_len * 3*D_MODEL * sizeof(float));
-        float* h_k   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
-        float* h_v   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
+        // float *d_k, *d_v;
+        // float* h_qkv = (float*)malloc((size_t)seq_len * 3*D_MODEL * sizeof(float));
+        // float* h_k   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
+        // float* h_v   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
 
-        CUDA_CHECK(cudaMemcpy(h_qkv, buf_qkv,
-            (size_t)seq_len * 3*D_MODEL * sizeof(float),
-            cudaMemcpyDeviceToHost));
-        for (int s = 0; s < seq_len; s++) {
-            memcpy(h_k + s*D_MODEL, h_qkv + s*3*D_MODEL +   D_MODEL, D_MODEL*sizeof(float));
-            memcpy(h_v + s*D_MODEL, h_qkv + s*3*D_MODEL + 2*D_MODEL, D_MODEL*sizeof(float));
-        }
-        CUDA_CHECK(cudaMalloc(&d_k, (size_t)seq_len*D_MODEL*sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_v, (size_t)seq_len*D_MODEL*sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_k, h_k, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_v, h_v, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        kv.append_token_kv_batch(d_k, d_v, seq_len);
-        cudaFree(d_k); cudaFree(d_v);
-        free(h_qkv); free(h_k); free(h_v);
+        // CUDA_CHECK(cudaMemcpy(h_qkv, buf_qkv,
+        //     (size_t)seq_len * 3*D_MODEL * sizeof(float),
+        //     cudaMemcpyDeviceToHost));
+        // for (int s = 0; s < seq_len; s++) {
+        //     memcpy(h_k + s*D_MODEL, h_qkv + s*3*D_MODEL +   D_MODEL, D_MODEL*sizeof(float));
+        //     memcpy(h_v + s*D_MODEL, h_qkv + s*3*D_MODEL + 2*D_MODEL, D_MODEL*sizeof(float));
+        // }
+        // CUDA_CHECK(cudaMalloc(&d_k, (size_t)seq_len*D_MODEL*sizeof(float)));
+        // CUDA_CHECK(cudaMalloc(&d_v, (size_t)seq_len*D_MODEL*sizeof(float)));
+        // CUDA_CHECK(cudaMemcpy(d_k, h_k, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
+        // CUDA_CHECK(cudaMemcpy(d_v, h_v, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
+        // kv.append_token_kv_batch(d_k, d_v, seq_len);
+        // cudaFree(d_k); cudaFree(d_v);
+        // free(h_qkv); free(h_k); free(h_v);
+        kv.append_qkv_from_interleaved(buf_qkv, seq_len);
     }
 
     // 3) QK^T — cuBLAS strided batched (interleaved Q, K in buf_qkv)
