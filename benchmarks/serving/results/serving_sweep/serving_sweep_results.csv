@@ -1,0 +1,49 @@
+mode,fit_case,num_requests,prompt_len,output_len,block_size,total_blocks,blocks_per_request_calc,total_blocks_needed_calc,all_requests_fit_expected,completed,total_time_ms,req_per_s,out_tok_per_s,total_tok_per_s,peak_used_blocks,ttft_mean,ttft_p50,ttft_p95,tpot_mean,tpot_p50,tpot_p95,e2e_mean,e2e_p50,e2e_p95,status,cmd,error
+batch,fit,1,128,32,16,132,120,120,True,1,342.986816,2.915564,93.298047,466.490233,120,23.79126,23.79126,23.79126,10.296576,10.296576,10.296576,342.985107,342.985107,342.985107,ok,build/bench_offline_gpt2_wmma 1 128 32 16 132 0,
+batch,not_fit,1,128,32,16,120,120,120,True,1,328.027344,3.048526,97.552843,487.764216,120,22.442627,22.442627,22.442627,9.857516,9.857516,9.857516,328.025635,328.025635,328.025635,ok,build/bench_offline_gpt2_wmma 1 128 32 16 120 0,
+batch,fit,2,128,32,16,264,120,240,True,2,369.637939,5.4107,173.1424,865.712,240,29.639282,29.639282,35.083557,10.967636,10.967636,11.143257,369.635986,369.635986,369.635986,ok,build/bench_offline_gpt2_wmma 2 128 32 16 264 0,
+batch,not_fit,2,128,32,16,120,120,240,False,2,643.364014,3.10866,99.477121,497.385606,120,181.05603,181.05603,323.709436,9.833354,9.833354,9.863301,485.890015,485.890015,627.615076,ok,build/bench_offline_gpt2_wmma 2 128 32 16 120 0,
+batch,fit,4,128,32,16,528,120,480,True,4,391.243408,10.223814,327.162062,1635.810308,480,39.296814,39.316528,54.31665,11.353047,11.352409,11.838446,391.241272,391.241211,391.241418,ok,build/bench_offline_gpt2_wmma 4 128 32 16 528 0,
+batch,not_fit,4,128,32,16,240,120,480,False,4,687.424072,5.818824,186.202382,931.011912,240,199.018921,199.027466,373.818176,10.364884,10.364608,10.630686,520.330322,520.330322,687.422607,ok,build/bench_offline_gpt2_wmma 4 128 32 16 240 0,
+batch,fit,8,128,32,16,1056,120,960,True,8,466.719482,17.140917,548.50935,2742.546751,960,61.513123,61.516479,96.478589,13.071103,13.070994,14.199505,466.717316,466.717285,466.717529,ok,build/bench_offline_gpt2_wmma 8 128 32 16 1056 0,
+batch,not_fit,8,128,32,16,480,120,960,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma 8 128 32 16 480 0,"[config] num_requests=8 prompt_len=128 output_len=32 block_size=16 total_blocks=480
+[config] blocks_per_request≈120, total_if_all_running≈960
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"
+batch,fit,16,128,32,16,2112,120,1920,True,16,623.624023,25.656484,821.007499,4105.037497,1920,105.842041,105.849365,180.709534,16.702551,16.702314,19.118306,623.621124,623.621094,623.621582,ok,build/bench_offline_gpt2_wmma 16 128 32 16 2112 0,
+batch,not_fit,16,128,32,16,960,120,1920,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma 16 128 32 16 960 0,"[config] num_requests=16 prompt_len=128 output_len=32 block_size=16 total_blocks=960
+[config] blocks_per_request≈120, total_if_all_running≈1920
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"
+batch,fit,32,128,32,16,4224,120,3840,True,32,955.371338,33.494829,1071.834542,5359.172708,3840,195.761864,194.950317,351.688708,24.503404,24.529584,29.529491,955.367393,955.367432,955.368274,ok,build/bench_offline_gpt2_wmma 32 128 32 16 4224 0,
+batch,not_fit,32,128,32,16,1920,120,3840,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma 32 128 32 16 1920 0,"[config] num_requests=32 prompt_len=128 output_len=32 block_size=16 total_blocks=1920
+[config] blocks_per_request≈120, total_if_all_running≈3840
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"
+nobatch,fit,1,128,32,16,132,120,120,True,1,318.897949,3.135799,100.345581,501.727905,120,22.517334,22.517334,22.517334,9.56061,9.56061,9.56061,318.89624,318.89624,318.89624,ok,build/bench_offline_gpt2_wmma_decode_nobatch 1 128 32 16 132 0,
+nobatch,not_fit,1,128,32,16,120,120,120,True,1,319.089844,3.133914,100.285235,501.426176,120,22.545166,22.545166,22.545166,9.565902,9.565902,9.565902,319.088135,319.088135,319.088135,ok,build/bench_offline_gpt2_wmma_decode_nobatch 1 128 32 16 120 0,
+nobatch,fit,2,128,32,16,264,120,240,True,2,624.22168,3.20399,102.527679,512.638395,240,28.006714,28.006714,33.0245,19.23269,19.23269,19.39455,624.220093,624.220093,624.220203,ok,build/bench_offline_gpt2_wmma_decode_nobatch 2 128 32 16 264 0,
+nobatch,not_fit,2,128,32,16,120,120,240,False,2,636.542969,3.141972,100.543095,502.715474,120,182.826782,182.826782,326.277576,9.708906,9.708906,9.902003,483.802856,483.802856,621.267639,ok,build/bench_offline_gpt2_wmma_decode_nobatch 2 128 32 16 120 0,
+nobatch,fit,4,128,32,16,528,120,480,True,4,1235.699707,3.237032,103.585037,517.925186,480,39.231567,39.238403,54.259937,38.595697,38.595479,39.080787,1235.698181,1235.698242,1235.698242,ok,build/bench_offline_gpt2_wmma_decode_nobatch 4 128 32 16 528 0,
+nobatch,not_fit,4,128,32,16,240,120,480,False,4,1234.988281,3.238897,103.644708,518.223541,240,334.656006,334.665161,645.028796,19.195533,19.195238,19.402584,929.717529,929.717529,1234.98678,ok,build/bench_offline_gpt2_wmma_decode_nobatch 4 128 32 16 240 0,
+nobatch,fit,8,128,32,16,1056,120,960,True,8,2457.675293,3.255109,104.163475,520.817377,960,61.598877,61.605469,96.575854,77.292729,77.29252,78.421656,2457.673462,2457.673584,2457.673584,ok,build/bench_offline_gpt2_wmma_decode_nobatch 8 128 32 16 1056 0,
+nobatch,not_fit,8,128,32,16,480,120,960,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma_decode_nobatch 8 128 32 16 480 0,"[config] num_requests=8 prompt_len=128 output_len=32 block_size=16 total_blocks=480
+[config] blocks_per_request≈120, total_if_all_running≈960
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"
+nobatch,fit,16,128,32,16,2112,120,1920,True,16,4901.081055,3.264586,104.466748,522.333741,1920,105.823212,105.837036,180.6828,154.685647,154.685204,157.101364,4901.078278,4901.078369,4901.078674,ok,build/bench_offline_gpt2_wmma_decode_nobatch 16 128 32 16 2112 0,
+nobatch,not_fit,16,128,32,16,960,120,1920,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma_decode_nobatch 16 128 32 16 960 0,"[config] num_requests=16 prompt_len=128 output_len=32 block_size=16 total_blocks=960
+[config] blocks_per_request≈120, total_if_all_running≈1920
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"
+nobatch,fit,32,128,32,16,4224,120,3840,True,32,9759.720703,3.278782,104.921035,524.605176,3840,192.083145,192.05481,346.546252,308.633371,308.634285,313.615753,9759.717644,9759.717651,9759.718506,ok,build/bench_offline_gpt2_wmma_decode_nobatch 32 128 32 16 4224 0,
+nobatch,not_fit,32,128,32,16,1920,120,3840,False,,,,,,,,,,,,,,,,failed,build/bench_offline_gpt2_wmma_decode_nobatch 32 128 32 16 1920 0,"[config] num_requests=32 prompt_len=128 output_len=32 block_size=16 total_blocks=1920
+[config] blocks_per_request≈120, total_if_all_running≈3840
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM
+"

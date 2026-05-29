@@ -1,0 +1,34 @@
+[config] num_requests=2 prompt_len=128 output_len=32 block_size=16 total_blocks=120
+[config] blocks_per_request≈120, total_if_all_running≈240
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+
+===== Offline GPT-2 WMMA Serving Benchmark =====
+num_requests,2
+completed_requests,2
+prompt_len,128
+output_len,32
+block_size,16
+total_blocks,120
+blocks_per_request_estimate,120
+peak_used_blocks,120
+final_free_blocks,120
+scheduler_steps,64
+total_time_ms,643.364014
+request_throughput_req_per_s,3.108660
+output_token_throughput_tok_per_s,99.477121
+total_token_throughput_tok_per_s,497.385606
+ttft_mean_ms,181.056030
+ttft_p50_ms,181.056030
+ttft_p90_ms,307.859058
+ttft_p95_ms,323.709436
+ttft_p99_ms,336.389739
+tpot_mean_ms,9.833354
+tpot_p50_ms,9.833354
+tpot_p90_ms,9.859974
+tpot_p95_ms,9.863301
+tpot_p99_ms,9.865963
+e2e_mean_ms,485.890015
+e2e_p50_ms,485.890015
+e2e_p90_ms,611.867847
+e2e_p95_ms,627.615076
+e2e_p99_ms,640.212859

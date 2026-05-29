@@ -1,0 +1,4 @@
+[config] num_requests=32 prompt_len=128 output_len=32 block_size=16 total_blocks=2880
+[config] blocks_per_request≈120, total_if_all_running≈3840
+[warning] total_blocks is not enough to keep all requests running simultaneously. Some requests may wait in scheduler.
+BlockAllocator::allocate: OOM

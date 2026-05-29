@@ -1,0 +1,3 @@
+Loading GPT-2 weights (WMMA FP16)... done
+num_requests,prompt_len,output_len,block_size,total_blocks,completed,total_time_ms,req_per_s,out_tok_per_s,total_tok_per_s,peak_used_blocks,ttft_mean,ttft_p50,ttft_p95,tpot_mean,tpot_p50,tpot_p95,e2e_mean,e2e_p50,e2e_p95
+16,128,32,16,2112,16,4901.081055,3.264586,104.466748,522.333741,1920,105.823212,105.837036,180.682800,154.685647,154.685204,157.101364,4901.078278,4901.078369,4901.078674

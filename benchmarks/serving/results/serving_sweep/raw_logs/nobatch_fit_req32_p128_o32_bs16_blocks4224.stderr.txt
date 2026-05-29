@@ -1,0 +1,33 @@
+[config] num_requests=32 prompt_len=128 output_len=32 block_size=16 total_blocks=4224
+[config] blocks_per_request≈120, total_if_all_running≈3840
+
+===== Offline GPT-2 WMMA Serving Benchmark No Decode Batch =====
+num_requests,32
+completed_requests,32
+prompt_len,128
+output_len,32
+block_size,16
+total_blocks,4224
+blocks_per_request_estimate,120
+peak_used_blocks,3840
+final_free_blocks,4224
+scheduler_steps,32
+total_time_ms,9759.720703
+request_throughput_req_per_s,3.278782
+output_token_throughput_tok_per_s,104.921035
+total_token_throughput_tok_per_s,524.605176
+ttft_mean_ms,192.083145
+ttft_p50_ms,192.054810
+ttft_p90_ms,329.391626
+ttft_p95_ms,346.546252
+ttft_p99_ms,360.265466
+tpot_mean_ms,308.633371
+tpot_p50_ms,308.634285
+tpot_p90_ms,313.062053
+tpot_p95_ms,313.615753
+tpot_p99_ms,314.059326
+e2e_mean_ms,9759.717644
+e2e_p50_ms,9759.717651
+e2e_p90_ms,9759.718506
+e2e_p95_ms,9759.718506
+e2e_p99_ms,9759.718674
