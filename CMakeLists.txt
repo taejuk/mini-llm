@@ -84,6 +84,17 @@ target_link_libraries(gpt2_server PRIVATE
     gpt2_fp32_lib
 )
 
+# ── GPT-2 WMMA token latency benchmark ─────────────────────────
+add_executable(bench_gpt2_wmma_token_latency
+    benchmarks/gpt2/bench_gpt2_wmma_token_latency.cu
+)
+target_include_directories(bench_gpt2_wmma_token_latency PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(bench_gpt2_wmma_token_latency PRIVATE
+    gpt2_wmma_lib
+)
+
 # ── Unit Tests ───────────────────────────────────────────────────
 enable_testing()
 
