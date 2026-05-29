@@ -3,6 +3,7 @@
 #include "scheduler/mpsc_queue.h"
 #include "scheduler/request.h"
 #include "vllm/allocator.cuh"
+#include "model/gpt2_common.cuh"
 #include <deque>
 #include <vector>
 #include <memory>

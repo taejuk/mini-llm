@@ -65,6 +65,9 @@ void Scheduler::update(const ScheduleBatch& batch,
     for(Request* req: running_) {
         if ((int)req->output_ids.size() >= req->max_new_tokens) {
             req->state = RequestState::DONE;
+	    
+	    for(auto& kv : req->layer_kv) kv.free_all();
+
             req->result_promise.set_value(req->output_ids);
         }
     }
@@ -87,7 +90,7 @@ int Scheduler::try_admit() {
     while(!waiting_.empty()) {
         Request* cand_rq = waiting_.front();
         int prompt_len = (int)cand_rq->prompt_ids.size();
-        int needed = (prompt_len + block_size_ - 1) / block_size_;
+        int needed = blocks_needed_for(cand_rq);
         if(needed > free_blocks) break;
         cand_rq->state = RequestState::PREFILL;
         running_.push_back(cand_rq);
@@ -101,15 +104,28 @@ int Scheduler::try_admit() {
 // 다음 running을 실행하기 위해 필요한 block 수
 int Scheduler::blocks_needed_for_running() const {
     int needed = 0;
-    for(const Request* req : running_) {
-        const auto& bt = req->kv.get_block_table();
-        if(bt.empty()) needed++;
-        else if(bt.back().filled >= block_size_) needed++;
+
+    for (const Request* req : running_) {
+        if (req->state != RequestState::DECODE) {
+            continue;
+        }
+
+        for (const auto& kv : req->layer_kv) {
+            const auto& bt = kv.get_block_table();
+
+            if (bt.empty()) {
+                needed++;
+            } else if (bt.back().filled >= block_size_) {
+                needed++;
+            }
+        }
     }
+
     return needed;
 }
 
 int Scheduler::blocks_needed_for(const Request* req) const {
-    int result = (req->prompt_ids.size() + block_size_ - 1) / block_size_;
-    return result;
+    int prompt_len = (int)req->prompt_ids.size();
+    int per_layer = (prompt_len + block_size_ - 1) / block_size_;
+    return per_layer * N_LAYERS;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "vllm/kv_cache.cuh"
+#include "model/gpt2_common.cuh"
 #include <vector>
 #include <future>
 
@@ -17,7 +18,7 @@ struct Request {
     std::vector<int>              output_ids;
     int                           max_new_tokens;
     RequestState                  state;
-    PagedKVCache                  kv;
+    std::vector<PagedKVCache>                  layer_kv;
 
     std::promise<std::vector<int>> result_promise;
 
@@ -26,8 +27,13 @@ struct Request {
         , prompt_ids(std::move(prompt))
         , max_new_tokens(max_tokens)
         , state(RequestState::WAITING)
-        , kv(block_size, hidden_dim, id)
-    {}
+    {
+    	layer_kv.reserve(N_LAYERS);
+
+	for (int l = 0; l < N_LAYERS; l++) {
+            layer_kv.emplace_back(block_size, hidden_dim, id);
+        }
+    }
 
     Request(const Request&)            = delete;
     Request& operator=(const Request&) = delete;

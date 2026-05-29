@@ -441,7 +441,7 @@ GPT2ModelWMMA& GPT2ModelWMMA::get() {
     return *g_wmma_instance;
 }
 
-int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, PagedKVCache& kv) {
+int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, std::vector<PagedKVCache>& layer_kv) {
     // Embedding
     embedding_lookup(d_token_ids, W.wte, W.wpe, buf_x, prompt_len, D_MODEL, 0);
 
@@ -450,7 +450,7 @@ int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, PagedKVCache&
         block_prefill_wmma(handle, buf_x, W, l,
                            buf_ln, buf_qkv, buf_S, buf_O,
                            buf_attn, buf_ff, buf_xh,
-                           kv, prompt_len);
+                           layer_kv[l], prompt_len);
 
     // Final LN + LM head (마지막 토큰)
     float* last_x = buf_x + (size_t)(prompt_len - 1) * D_MODEL;
@@ -472,8 +472,8 @@ int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, PagedKVCache&
     return next;
 }
 
-int GPT2ModelWMMA::decode_step(int token_id, PagedKVCache& kv) {
-    int    pos   = kv.get_num_tokens();
+int GPT2ModelWMMA::decode_step(int token_id, std::vector<PagedKVCache>& layer_kv) {
+    int    pos   = layer_kv[0].get_num_tokens();
     float* x_row = buf_x + (size_t)pos * D_MODEL;
 
     // Embedding
@@ -487,7 +487,7 @@ int GPT2ModelWMMA::decode_step(int token_id, PagedKVCache& kv) {
         block_decode_wmma(handle, x_row, W, l,
                           buf_ln, buf_qkv, buf_O,
                           buf_attn, buf_ff, buf_xh,
-                          kv, d_block_table);
+                          layer_kv[l], d_block_table);
 
     // Final LN + LM head
     layernorm(x_row, buf_ln, W.ln_f_w, W.ln_f_b, 1, D_MODEL);
@@ -589,114 +589,398 @@ __global__ void paged_decode_mha_batch_kernel(
 /* ============================================================
  * batch_decode
  * ============================================================ */
-std::vector<int> GPT2ModelWMMA::batch_decode(const std::vector<Request*>& reqs) {
+std::vector<int> GPT2ModelWMMA::batch_decode(
+    const std::vector<Request*>& reqs
+) {
     int B = (int)reqs.size();
-    if (B == 0) return {};
+
+    if (B == 0) {
+        return {};
+    }
+
+    if (B > MAX_BATCH) {
+        fprintf(stderr,
+                "GPT2ModelWMMA::batch_decode: B=%d exceeds MAX_BATCH=%d\n",
+                B,
+                MAX_BATCH);
+        exit(1);
+    }
 
     int max_blocks = MAX_SEQ / block_size + 1;
-    float scale    = 1.f / sqrtf((float)D_HEAD);
-    float* pool    = BlockAllocator::getInstance().get_pool();
 
-    /* ── (1) 각 시퀀스의 embedding 을 buf_x 에 스택 ──────────── */
-    // buf_x: [B, D_MODEL] — 각 행이 시퀀스 b의 현재 토큰 embedding
-    std::vector<int> h_seq_lens(B);
-    std::vector<int> h_block_tables(B * max_blocks, 0);
+    const float scale = 1.f / sqrtf((float)D_HEAD);
+    const float alpha = 1.f;
+    const float beta  = 0.f;
 
+    float* pool = BlockAllocator::getInstance().get_pool();
+
+    std::vector<int> h_seq_lens(B, 0);
+    std::vector<int> h_block_tables((size_t)B * max_blocks, 0);
+
+    /*
+     * 1. 각 request의 현재 decode input token을 embedding해서
+     *    buf_x에 [B, D_MODEL] 형태로 쌓는다.
+     *
+     * position은 layer_kv[0] 기준으로 잡는다.
+     * 정상적인 layer별 KV 구조라면 모든 layer의 num_tokens는 같아야 한다.
+     */
     for (int b = 0; b < B; b++) {
         Request* req = reqs[b];
-        int pos      = req->kv.get_num_tokens();
-        int token_id = req->output_ids.empty()
-                       ? req->prompt_ids.back()
-                       : req->output_ids.back();
 
-        // GPU에 토큰 id 올리고 embedding
-        int* d_tok;
-        CUDA_CHECK(cudaMalloc(&d_tok, sizeof(int)));
-        CUDA_CHECK(cudaMemcpy(d_tok, &token_id, sizeof(int), cudaMemcpyHostToDevice));
-        embedding_lookup(d_tok, W.wte, W.wpe,
-                         buf_x + (size_t)b * D_MODEL,   // b번째 행에 저장
-                         1, D_MODEL, pos);
-        cudaFree(d_tok);
-
-        // seq_lens, block_table 수집
-        h_seq_lens[b] = pos;
-        const auto& bt = req->kv.get_block_table();
-        for (int i = 0; i < (int)bt.size(); i++)
-            h_block_tables[b * max_blocks + i] = bt[i].phys_block_id;
-    }
-
-    // GPU에 복사
-    CUDA_CHECK(cudaMemcpy(d_seq_lens, h_seq_lens.data(),
-                          B * sizeof(int), cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_batch_block_tables, h_block_tables.data(),
-                          B * max_blocks * sizeof(int), cudaMemcpyHostToDevice));
-
-    /* ── (2) 12개 Transformer layer ──────────────────────────── */
-    for (int l = 0; l < N_LAYERS; l++) {
-        // LayerNorm: [B, D_MODEL]
-        layernorm(buf_x, buf_ln, W.ln1_w[l], W.ln1_b[l], B, D_MODEL);
-
-        // QKV projection: [B, D_MODEL] → [B, 3*D_MODEL]
-        linear_wmma(buf_ln, W.qkv_w[l], W.qkv_b[l], buf_qkv,
-                    B, D_MODEL, 3*D_MODEL, buf_xh);
-
-        // 각 시퀀스 K,V → KV cache 추가
-        for (int b = 0; b < B; b++) {
-            float* qkv_b_ptr = buf_qkv + (size_t)b * 3*D_MODEL;
-            reqs[b]->kv.append_token_kv(qkv_b_ptr + D_MODEL,
-                                         qkv_b_ptr + 2*D_MODEL);
-            // seq_lens 업데이트 (append 후 +1)
-            h_seq_lens[b] = reqs[b]->kv.get_num_tokens();
+        if ((int)req->layer_kv.size() != N_LAYERS) {
+            fprintf(stderr,
+                    "GPT2ModelWMMA::batch_decode: req id=%d has layer_kv.size()=%zu, expected %d\n",
+                    req->id,
+                    req->layer_kv.size(),
+                    N_LAYERS);
+            exit(1);
         }
-        CUDA_CHECK(cudaMemcpy(d_seq_lens, h_seq_lens.data(),
-                              B * sizeof(int), cudaMemcpyHostToDevice));
 
-        // Batched Paged Attention
-        size_t smem = (size_t)(*std::max_element(h_seq_lens.begin(), h_seq_lens.end()))
-                      * sizeof(float);
-        dim3 grid(N_HEADS, B);
-        paged_decode_mha_batch_kernel<<<grid, DECODE_BLOCK, smem>>>(
-            buf_qkv,               // Q: [B, D_MODEL] (Q 부분만)
-            d_batch_block_tables, d_seq_lens, pool,
-            buf_O,                 // [B, D_MODEL]
-            B, max_blocks, block_size, D_MODEL, D_HEAD, scale);
+        int pos = req->layer_kv[0].get_num_tokens();
 
-        // Output projection: [B, D_MODEL]
-        linear_wmma(buf_O, W.out_w[l], W.out_b[l], buf_attn,
-                    B, D_MODEL, D_MODEL, buf_xh);
-        residual_add(buf_x, buf_attn, B * D_MODEL);
+        if (pos >= MAX_SEQ) {
+            fprintf(stderr,
+                    "GPT2ModelWMMA::batch_decode: req id=%d position=%d exceeds MAX_SEQ=%d\n",
+                    req->id,
+                    pos,
+                    MAX_SEQ);
+            exit(1);
+        }
 
-        // FFN
-        layernorm(buf_x, buf_ln, W.ln2_w[l], W.ln2_b[l], B, D_MODEL);
-        linear_wmma(buf_ln, W.fc1_w[l], W.fc1_b[l], buf_ff,
-                    B, D_MODEL, D_FF, buf_xh);
-        gelu(buf_ff, B * D_FF);
-        linear_wmma(buf_ff, W.fc2_w[l], W.fc2_b[l], buf_attn,
-                    B, D_FF, D_MODEL, buf_xh);
-        residual_add(buf_x, buf_attn, B * D_MODEL);
+        int token_id = req->output_ids.empty()
+            ? req->prompt_ids.back()
+            : req->output_ids.back();
+
+        int* d_tok = nullptr;
+
+        CUDA_CHECK(cudaMalloc(&d_tok, sizeof(int)));
+
+        CUDA_CHECK(cudaMemcpy(
+            d_tok,
+            &token_id,
+            sizeof(int),
+            cudaMemcpyHostToDevice
+        ));
+
+        embedding_lookup(
+            d_tok,
+            W.wte,
+            W.wpe,
+            buf_x + (size_t)b * D_MODEL,
+            1,
+            D_MODEL,
+            pos
+        );
+
+        CUDA_CHECK(cudaFree(d_tok));
     }
 
-    /* ── (3) Final LN + LM head → logits [B, VOCAB] ─────────── */
-    layernorm(buf_x, buf_ln, W.ln_f_w, W.ln_f_b, B, D_MODEL);
+    /*
+     * 2. Transformer layers
+     *
+     * 핵심:
+     * - layer l에서는 reqs[b]->layer_kv[l]만 사용한다.
+     * - block table도 layer마다 다시 만들어야 한다.
+     * - 현재 paged_decode_mha_batch_kernel은 Q를 [B, D_MODEL]로 읽으므로,
+     *   buf_qkv의 Q 부분만 buf_ln에 복사해서 kernel에 넘긴다.
+     */
+    for (int l = 0; l < N_LAYERS; l++) {
+        /*
+         * 2-1. LN1
+         * buf_x  : [B, D_MODEL]
+         * buf_ln : [B, D_MODEL]
+         */
+        layernorm(
+            buf_x,
+            buf_ln,
+            W.ln1_w[l],
+            W.ln1_b[l],
+            B,
+            D_MODEL
+        );
 
-    const float alpha = 1.f, beta = 0.f;
-    // [B, D_MODEL] @ wte^T [D_MODEL, VOCAB] → [B, VOCAB]
-    CUBLAS_CHECK(cublasSgemm(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        VOCAB, B, D_MODEL,
-        &alpha, W.wte, D_MODEL, buf_ln, D_MODEL,
-        &beta,  buf_batch_logits, VOCAB));
+        /*
+         * 2-2. QKV projection
+         * buf_qkv: [B, 3 * D_MODEL]
+         *
+         * row b layout:
+         *   buf_qkv[b] = [Q | K | V]
+         */
+        linear_wmma(
+            buf_ln,
+            W.qkv_w[l],
+            W.qkv_b[l],
+            buf_qkv,
+            B,
+            D_MODEL,
+            3 * D_MODEL,
+            buf_xh
+        );
 
-    /* ── (4) Argmax → next tokens ────────────────────────────── */
+        /*
+         * 2-3. 현재 layer의 K/V를 각 request의 layer_kv[l]에 append.
+         *
+         * append 후 attention에서 현재 token까지 포함해야 하므로
+         * h_seq_lens[b]는 append 이후의 길이를 사용한다.
+         */
+        std::fill(
+            h_seq_lens.begin(),
+            h_seq_lens.end(),
+            0
+        );
+
+        std::fill(
+            h_block_tables.begin(),
+            h_block_tables.end(),
+            0
+        );
+
+        for (int b = 0; b < B; b++) {
+            Request* req = reqs[b];
+
+            float* qkv_b_ptr = buf_qkv + (size_t)b * 3 * D_MODEL;
+
+            req->layer_kv[l].append_token_kv(
+                qkv_b_ptr + D_MODEL,
+                qkv_b_ptr + 2 * D_MODEL
+            );
+
+            int seq_len = req->layer_kv[l].get_num_tokens();
+
+            if (seq_len > MAX_SEQ) {
+                fprintf(stderr,
+                        "GPT2ModelWMMA::batch_decode: req id=%d layer=%d seq_len=%d exceeds MAX_SEQ=%d\n",
+                        req->id,
+                        l,
+                        seq_len,
+                        MAX_SEQ);
+                exit(1);
+            }
+
+            h_seq_lens[b] = seq_len;
+
+            const auto& bt = req->layer_kv[l].get_block_table();
+
+            if ((int)bt.size() > max_blocks) {
+                fprintf(stderr,
+                        "GPT2ModelWMMA::batch_decode: req id=%d layer=%d block_table.size()=%zu exceeds max_blocks=%d\n",
+                        req->id,
+                        l,
+                        bt.size(),
+                        max_blocks);
+                exit(1);
+            }
+
+            for (int i = 0; i < (int)bt.size(); i++) {
+                h_block_tables[(size_t)b * max_blocks + i] =
+                    bt[i].phys_block_id;
+            }
+        }
+
+        /*
+         * 2-4. 현재 kernel은 Q를 [B, D_MODEL] contiguous로 읽는다.
+         *
+         * 그런데 buf_qkv는 [B, 3 * D_MODEL]라서 그대로 넘기면
+         * b > 0에서 Q offset이 틀어진다.
+         *
+         * 따라서 Q 부분만 buf_ln에 복사해서:
+         *   buf_ln[b] = Q_b
+         * 로 만든 뒤 paged attention kernel에 넘긴다.
+         *
+         * 이 시점 이후 LN1 결과는 필요 없고,
+         * buf_ln은 FFN 앞 LN2에서 다시 덮어쓰므로 재사용해도 된다.
+         */
+        for (int b = 0; b < B; b++) {
+            CUDA_CHECK(cudaMemcpy(
+                buf_ln + (size_t)b * D_MODEL,
+                buf_qkv + (size_t)b * 3 * D_MODEL,
+                (size_t)D_MODEL * sizeof(float),
+                cudaMemcpyDeviceToDevice
+            ));
+        }
+
+        /*
+         * 2-5. seq_lens와 block tables를 GPU로 복사.
+         * block table은 layer마다 다를 수 있으므로 매 layer마다 갱신한다.
+         */
+        CUDA_CHECK(cudaMemcpy(
+            d_seq_lens,
+            h_seq_lens.data(),
+            (size_t)B * sizeof(int),
+            cudaMemcpyHostToDevice
+        ));
+
+        CUDA_CHECK(cudaMemcpy(
+            d_batch_block_tables,
+            h_block_tables.data(),
+            (size_t)B * max_blocks * sizeof(int),
+            cudaMemcpyHostToDevice
+        ));
+
+        /*
+         * 2-6. Batched paged attention.
+         *
+         * grid.x = head
+         * grid.y = batch item
+         * shared memory = max seq len for this batch
+         */
+        int max_seq_len =
+            *std::max_element(h_seq_lens.begin(), h_seq_lens.end());
+
+        size_t smem = (size_t)max_seq_len * sizeof(float);
+
+        dim3 grid(N_HEADS, B);
+
+        paged_decode_mha_batch_kernel<<<grid, DECODE_BLOCK, smem>>>(
+            buf_ln,
+            d_batch_block_tables,
+            d_seq_lens,
+            pool,
+            buf_O,
+            B,
+            max_blocks,
+            block_size,
+            D_MODEL,
+            D_HEAD,
+            scale
+        );
+
+        CUDA_CHECK(cudaGetLastError());
+
+        /*
+         * 2-7. Output projection
+         * buf_O    : [B, D_MODEL]
+         * buf_attn : [B, D_MODEL]
+         */
+        linear_wmma(
+            buf_O,
+            W.out_w[l],
+            W.out_b[l],
+            buf_attn,
+            B,
+            D_MODEL,
+            D_MODEL,
+            buf_xh
+        );
+
+        /*
+         * Residual connection:
+         * buf_x = buf_x + attention_out
+         */
+        residual_add(
+            buf_x,
+            buf_attn,
+            B * D_MODEL
+        );
+
+        /*
+         * 2-8. FFN
+         */
+        layernorm(
+            buf_x,
+            buf_ln,
+            W.ln2_w[l],
+            W.ln2_b[l],
+            B,
+            D_MODEL
+        );
+
+        linear_wmma(
+            buf_ln,
+            W.fc1_w[l],
+            W.fc1_b[l],
+            buf_ff,
+            B,
+            D_MODEL,
+            D_FF,
+            buf_xh
+        );
+
+        gelu(
+            buf_ff,
+            B * D_FF
+        );
+
+        linear_wmma(
+            buf_ff,
+            W.fc2_w[l],
+            W.fc2_b[l],
+            buf_attn,
+            B,
+            D_FF,
+            D_MODEL,
+            buf_xh
+        );
+
+        /*
+         * Residual connection:
+         * buf_x = buf_x + ffn_out
+         */
+        residual_add(
+            buf_x,
+            buf_attn,
+            B * D_MODEL
+        );
+    }
+
+    /*
+     * 3. Final LayerNorm
+     */
+    layernorm(
+        buf_x,
+        buf_ln,
+        W.ln_f_w,
+        W.ln_f_b,
+        B,
+        D_MODEL
+    );
+
+    /*
+     * 4. LM head
+     *
+     * buf_ln: [B, D_MODEL]
+     * W.wte : [VOCAB, D_MODEL]
+     * logits: [B, VOCAB]
+     */
+    CUBLAS_CHECK(cublasSgemm(
+        handle,
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        VOCAB,
+        B,
+        D_MODEL,
+        &alpha,
+        W.wte,
+        D_MODEL,
+        buf_ln,
+        D_MODEL,
+        &beta,
+        buf_batch_logits,
+        VOCAB
+    ));
+
+    /*
+     * 5. Copy logits to host and argmax per request.
+     */
     CUDA_CHECK(cudaDeviceSynchronize());
-    std::vector<float> h_logits(B * VOCAB);
-    CUDA_CHECK(cudaMemcpy(h_logits.data(), buf_batch_logits,
-                          B * VOCAB * sizeof(float), cudaMemcpyDeviceToHost));
+
+    std::vector<float> h_logits((size_t)B * VOCAB);
+
+    CUDA_CHECK(cudaMemcpy(
+        h_logits.data(),
+        buf_batch_logits,
+        (size_t)B * VOCAB * sizeof(float),
+        cudaMemcpyDeviceToHost
+    ));
 
     std::vector<int> next_tokens(B);
+
     for (int b = 0; b < B; b++) {
-        const float* row = h_logits.data() + b * VOCAB;
-        next_tokens[b] = (int)(std::max_element(row, row + VOCAB) - row);
+        const float* row = h_logits.data() + (size_t)b * VOCAB;
+
+        next_tokens[b] =
+            (int)(std::max_element(row, row + VOCAB) - row);
     }
+
     return next_tokens;
 }

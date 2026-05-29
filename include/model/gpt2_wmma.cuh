@@ -65,8 +65,8 @@ public:
     GPT2ModelWMMA& operator=(const GPT2ModelWMMA&) = delete;
 
     /* 단일 시퀀스 */
-    int prefill(const int* d_token_ids, int prompt_len, PagedKVCache& kv);
-    int decode_step(int token_id, PagedKVCache& kv);
+    int prefill(const int* d_token_ids, int prompt_len, std::vector<PagedKVCache>& layer_kv);
+    int decode_step(int token_id, std::vector<PagedKVCache>& layer_kv);
 
     /* 배치 decode — Scheduler의 batch.decode_reqs를 직접 받음
      * 반환: 각 요청의 next token id (reqs와 동일한 순서) */

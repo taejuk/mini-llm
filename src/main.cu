@@ -29,7 +29,7 @@ void inference_loop(Scheduler& sched) {
                        req->prompt_ids.size() * sizeof(int),
                        cudaMemcpyHostToDevice);
 
-            int next_tok = model.prefill(d_ids, (int)req->prompt_ids.size(), req->kv);
+            int next_tok = model.prefill(d_ids, (int)req->prompt_ids.size(), req->layer_kv);
             next_tokens.push_back(next_tok);
             cudaFree(d_ids);
         }
