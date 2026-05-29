@@ -167,3 +167,17 @@ target_link_libraries(bench_offline_gpt2_wmma_decode_nobatch PRIVATE
     CUDA::cudart
 )
 
+
+# ── GPT-2 WMMA prefill prompt length sweep benchmark ─────────────
+add_executable(bench_gpt2_wmma_prefill_sweep
+    benchmarks/gpt2/bench_gpt2_wmma_prefill_sweep.cu
+)
+
+target_include_directories(bench_gpt2_wmma_prefill_sweep PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(bench_gpt2_wmma_prefill_sweep PRIVATE
+    gpt2_wmma_lib
+    CUDA::cudart
+)
