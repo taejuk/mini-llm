@@ -136,3 +136,19 @@ target_include_directories(test_scheduler PRIVATE
 )
 target_link_libraries(test_scheduler PRIVATE scheduler_lib CUDA::cudart)
 add_test(NAME test_scheduler COMMAND test_scheduler)
+
+# ── Offline GPT-2 WMMA serving benchmark ───────────────────────
+add_executable(bench_offline_gpt2_wmma
+    benchmarks/serving/offline_gpt2_wmma_bench.cu
+)
+
+target_include_directories(bench_offline_gpt2_wmma PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(bench_offline_gpt2_wmma PRIVATE
+    scheduler_lib
+    gpt2_wmma_lib
+    CUDA::cudart
+)
+
