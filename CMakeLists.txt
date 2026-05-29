@@ -152,3 +152,18 @@ target_link_libraries(bench_offline_gpt2_wmma PRIVATE
     CUDA::cudart
 )
 
+# ── Offline GPT-2 WMMA serving benchmark: decode no-batch ──────
+add_executable(bench_offline_gpt2_wmma_decode_nobatch
+    benchmarks/serving/offline_gpt2_wmma_decode_nobatch_bench.cu
+)
+
+target_include_directories(bench_offline_gpt2_wmma_decode_nobatch PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(bench_offline_gpt2_wmma_decode_nobatch PRIVATE
+    scheduler_lib
+    gpt2_wmma_lib
+    CUDA::cudart
+)
+

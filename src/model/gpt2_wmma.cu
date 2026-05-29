@@ -5,6 +5,7 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <nvtx3/nvToolsExt.h>
 
 
 #define CUDA_CHECK(call) \
@@ -246,21 +247,35 @@ static void block_prefill_wmma(cublasHandle_t handle, float* x,
     int nd = seq_len * D_MODEL;
 
     // Self-attention
+    nvtxRangePushA("ln1");
     layernorm(x, buf_ln, W.ln1_w[layer], W.ln1_b[layer], seq_len, D_MODEL);
+    nvtxRangePop();
+
+    nvtxRangePushA("mha_prefill");
     mha_prefill(handle, buf_ln,
                 W.qkv_w[layer], W.qkv_b[layer],
                 W.out_w[layer], W.out_b[layer],
                 buf_attn, buf_qkv, buf_S, buf_O, buf_xh,
                 kv, seq_len);
+    nvtxRangePop();
+
     residual_add(x, buf_attn, nd);
 
     // FFN
+    nvtxRangePushA("ln2");
     layernorm(x, buf_ln, W.ln2_w[layer], W.ln2_b[layer], seq_len, D_MODEL);
+    nvtxRangePop();
+    nvtxRangePushA("fc1");
     linear_wmma(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff,
                 seq_len, D_MODEL, D_FF, buf_xh);
+    nvtxRangePop();
+    nvtxRangePushA("gelu");
     gelu(buf_ff, seq_len * D_FF);
+    nvtxRangePop();
+    nvtxRangePushA("fc2");
     linear_wmma(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn,
                 seq_len, D_FF, D_MODEL, buf_xh);
+    nvtxRangePop();
     residual_add(x, buf_attn, nd);
 }
 
@@ -443,15 +458,20 @@ GPT2ModelWMMA& GPT2ModelWMMA::get() {
 
 int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, std::vector<PagedKVCache>& layer_kv) {
     // Embedding
+    nvtxRangePushA("prefill_embedding");
     embedding_lookup(d_token_ids, W.wte, W.wpe, buf_x, prompt_len, D_MODEL, 0);
-
+    nvtxRangePop();
     // Transformer layers
-    for (int l = 0; l < N_LAYERS; l++)
-        block_prefill_wmma(handle, buf_x, W, l,
+    for (int l = 0; l < N_LAYERS; l++) {
+        char range_name[64];
+	snprintf(range_name, sizeof(range_name), "prefill_layer_%d", l);
+	nvtxRangePushA(range_name);
+	block_prefill_wmma(handle, buf_x, W, l,
                            buf_ln, buf_qkv, buf_S, buf_O,
                            buf_attn, buf_ff, buf_xh,
                            layer_kv[l], prompt_len);
-
+	nvtxRangePop();
+    }
     // Final LN + LM head (마지막 토큰)
     float* last_x = buf_x + (size_t)(prompt_len - 1) * D_MODEL;
     layernorm(last_x, buf_ln, W.ln_f_w, W.ln_f_b, 1, D_MODEL);
