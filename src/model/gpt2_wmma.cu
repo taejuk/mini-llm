@@ -6,7 +6,11 @@
 #include <vector>
 #include <algorithm>
 #include <nvtx3/nvToolsExt.h>
+#include "kernel/flashattention1.cuh"
 
+#ifdef USE_FLASH_ATTENTION_PREFILL
+#define USE_FLASH_ATTENTION_PREFILL 0
+#endif
 
 #define CUDA_CHECK(call) \
     do { cudaError_t e=(call); if(e!=cudaSuccess){ \
@@ -132,48 +136,72 @@ static void mha_prefill(cublasHandle_t handle,
 
     // 1) QKV projection — WMMA
     //    x [seq, D] @ qkv_w [D, 3D] → buf_qkv [seq, 3D]
+    nvtxRangePushA("qkv_proj");
     linear_wmma(x, qkv_w, qkv_b, buf_qkv, seq_len, D_MODEL, 3*D_MODEL, buf_xh);
-
+    nvtxRangePop();
     // 2) K, V → PagedKVCache 저장
     {
-        // float *d_k, *d_v;
-        // float* h_qkv = (float*)malloc((size_t)seq_len * 3*D_MODEL * sizeof(float));
-        // float* h_k   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
-        // float* h_v   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
+	nvtxRangePushA("kv_append");
+        /*
+	float *d_k, *d_v;
+        float* h_qkv = (float*)malloc((size_t)seq_len * 3*D_MODEL * sizeof(float));
+        float* h_k   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
+        float* h_v   = (float*)malloc((size_t)seq_len * D_MODEL   * sizeof(float));
 
-        // CUDA_CHECK(cudaMemcpy(h_qkv, buf_qkv,
-        //     (size_t)seq_len * 3*D_MODEL * sizeof(float),
-        //     cudaMemcpyDeviceToHost));
-        // for (int s = 0; s < seq_len; s++) {
-        //     memcpy(h_k + s*D_MODEL, h_qkv + s*3*D_MODEL +   D_MODEL, D_MODEL*sizeof(float));
-        //     memcpy(h_v + s*D_MODEL, h_qkv + s*3*D_MODEL + 2*D_MODEL, D_MODEL*sizeof(float));
-        // }
-        // CUDA_CHECK(cudaMalloc(&d_k, (size_t)seq_len*D_MODEL*sizeof(float)));
-        // CUDA_CHECK(cudaMalloc(&d_v, (size_t)seq_len*D_MODEL*sizeof(float)));
-        // CUDA_CHECK(cudaMemcpy(d_k, h_k, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        // CUDA_CHECK(cudaMemcpy(d_v, h_v, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        // kv.append_token_kv_batch(d_k, d_v, seq_len);
-        // cudaFree(d_k); cudaFree(d_v);
-        // free(h_qkv); free(h_k); free(h_v);
-        kv.append_qkv_from_interleaved(buf_qkv, seq_len);
+        CUDA_CHECK(cudaMemcpy(h_qkv, buf_qkv,
+            (size_t)seq_len * 3*D_MODEL * sizeof(float),
+            cudaMemcpyDeviceToHost));
+        for (int s = 0; s < seq_len; s++) {
+            memcpy(h_k + s*D_MODEL, h_qkv + s*3*D_MODEL +   D_MODEL, D_MODEL*sizeof(float));
+            memcpy(h_v + s*D_MODEL, h_qkv + s*3*D_MODEL + 2*D_MODEL, D_MODEL*sizeof(float));
+        }
+        CUDA_CHECK(cudaMalloc(&d_k, (size_t)seq_len*D_MODEL*sizeof(float)));
+        CUDA_CHECK(cudaMalloc(&d_v, (size_t)seq_len*D_MODEL*sizeof(float)));
+        CUDA_CHECK(cudaMemcpy(d_k, h_k, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d_v, h_v, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
+        kv.append_token_kv_batch(d_k, d_v, seq_len);
+        cudaFree(d_k); cudaFree(d_v);
+        free(h_qkv); free(h_k); free(h_v);
+	*/    
+        kv.append_qkv_from_interleaved_no_alloc(buf_qkv, seq_len);
+        nvtxRangePop();
     }
 
     // 3) QK^T — cuBLAS strided batched (interleaved Q, K in buf_qkv)
+#if USE_FLASH_ATTENTION_PREFILL
+    nvtxRangePushA("flashattn1_prefill");
+    flashattention1_prefill(
+   	buf_qkv,
+        buf_O,
+        seq_len,
+        D_MODEL,
+        D_HEAD,
+        N_HEADS,
+        scale
+    );
+    nvtxRangePop();  
+#else  
+    nvtxRangePushA("qk_gemm");
     CUBLAS_CHECK(cublasSgemmStridedBatched(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        seq_len, seq_len, D_HEAD,
-        &scale,
-        buf_qkv + D_MODEL,  3*D_MODEL, D_HEAD,
-        buf_qkv,            3*D_MODEL, D_HEAD,
-        &beta,
-        buf_S, seq_len, (long long)seq_len*seq_len,
-        N_HEADS));
-
+    CUBLAS_OP_T, CUBLAS_OP_N,
+    seq_len, seq_len, D_HEAD,
+    &scale,
+    buf_qkv + D_MODEL,  3*D_MODEL, D_HEAD,
+    buf_qkv,            3*D_MODEL, D_HEAD,
+    &beta,
+    buf_S, seq_len, (long long)seq_len*seq_len,
+    N_HEADS));
+    nvtxRangePop();
     // 4) Causal mask + Softmax
+    nvtxRangePushA("causal_mask");
     causal_mask_apply(buf_S, seq_len, N_HEADS);
-    softmax_prefill(buf_S, seq_len, N_HEADS);
+    nvtxRangePop();
 
+    nvtxRangePushA("softmax");
+    softmax_prefill(buf_S, seq_len, N_HEADS);
+    nvtxRangePop();
     // 5) O = softmax(S) * V — cuBLAS strided batched
+    nvtxRangePushA("sv_gemm");
     CUBLAS_CHECK(cublasSgemmStridedBatched(handle,
         CUBLAS_OP_N, CUBLAS_OP_N,
         D_HEAD, seq_len, seq_len,
@@ -183,10 +211,13 @@ static void mha_prefill(cublasHandle_t handle,
         &beta,
         buf_O, D_MODEL, D_HEAD,
         N_HEADS));
-
+    nvtxRangePop();
+#endif
     // 6) Output projection — WMMA
     //    buf_O [seq, D] @ out_w [D, D] → attn_out [seq, D]
+    nvtxRangePushA("out_proj");
     linear_wmma(buf_O, out_w, out_b, attn_out, seq_len, D_MODEL, D_MODEL, buf_xh);
+    nvtxRangePop();
 }
 
 /* ============================================================
@@ -247,35 +278,35 @@ static void block_prefill_wmma(cublasHandle_t handle, float* x,
     int nd = seq_len * D_MODEL;
 
     // Self-attention
-    nvtxRangePushA("ln1");
+    //nvtxRangePushA("ln1");
     layernorm(x, buf_ln, W.ln1_w[layer], W.ln1_b[layer], seq_len, D_MODEL);
-    nvtxRangePop();
+    //nvtxRangePop();
 
-    nvtxRangePushA("mha_prefill");
+    //nvtxRangePushA("mha_prefill");
     mha_prefill(handle, buf_ln,
                 W.qkv_w[layer], W.qkv_b[layer],
                 W.out_w[layer], W.out_b[layer],
                 buf_attn, buf_qkv, buf_S, buf_O, buf_xh,
                 kv, seq_len);
-    nvtxRangePop();
+    //nvtxRangePop();
 
     residual_add(x, buf_attn, nd);
 
     // FFN
-    nvtxRangePushA("ln2");
+    //nvtxRangePushA("ln2");
     layernorm(x, buf_ln, W.ln2_w[layer], W.ln2_b[layer], seq_len, D_MODEL);
-    nvtxRangePop();
-    nvtxRangePushA("fc1");
+    //nvtxRangePop();
+    //nvtxRangePushA("fc1");
     linear_wmma(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff,
                 seq_len, D_MODEL, D_FF, buf_xh);
-    nvtxRangePop();
-    nvtxRangePushA("gelu");
+    //nvtxRangePop();
+    //nvtxRangePushA("gelu");
     gelu(buf_ff, seq_len * D_FF);
-    nvtxRangePop();
-    nvtxRangePushA("fc2");
+    //nvtxRangePop();
+    //nvtxRangePushA("fc2");
     linear_wmma(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn,
                 seq_len, D_FF, D_MODEL, buf_xh);
-    nvtxRangePop();
+    //nvtxRangePop();
     residual_add(x, buf_attn, nd);
 }
 
@@ -456,39 +487,109 @@ GPT2ModelWMMA& GPT2ModelWMMA::get() {
     return *g_wmma_instance;
 }
 
-int GPT2ModelWMMA::prefill(const int* d_token_ids, int prompt_len, std::vector<PagedKVCache>& layer_kv) {
+int GPT2ModelWMMA::prefill(
+    const int* d_token_ids,
+    int prompt_len,
+    std::vector<PagedKVCache>& layer_kv
+) {
+    /*
+     * 핵심 최적화:
+     * prompt_len이 정해졌으므로 prefill에 필요한 KV block 수가 결정된다.
+     * 모든 layer에 대해 미리 physical block과 d_block_table을 준비한다.
+     *
+     * 이후 mha_prefill() 안에서는 append_qkv_from_interleaved_no_alloc()
+     * 을 사용해서 K/V write kernel만 실행한다.
+     */
+    nvtxRangePushA("prefill_reserve_kv");
+    for (int l = 0; l < N_LAYERS; l++) {
+        layer_kv[l].reserve_blocks_for_tokens(prompt_len);
+    }
+    nvtxRangePop();
+
     // Embedding
     nvtxRangePushA("prefill_embedding");
-    embedding_lookup(d_token_ids, W.wte, W.wpe, buf_x, prompt_len, D_MODEL, 0);
+    embedding_lookup(
+        d_token_ids,
+        W.wte,
+        W.wpe,
+        buf_x,
+        prompt_len,
+        D_MODEL,
+        0
+    );
     nvtxRangePop();
+
     // Transformer layers
     for (int l = 0; l < N_LAYERS; l++) {
         char range_name[64];
-	snprintf(range_name, sizeof(range_name), "prefill_layer_%d", l);
-	nvtxRangePushA(range_name);
-	block_prefill_wmma(handle, buf_x, W, l,
-                           buf_ln, buf_qkv, buf_S, buf_O,
-                           buf_attn, buf_ff, buf_xh,
-                           layer_kv[l], prompt_len);
-	nvtxRangePop();
-    }
-    // Final LN + LM head (마지막 토큰)
-    float* last_x = buf_x + (size_t)(prompt_len - 1) * D_MODEL;
-    layernorm(last_x, buf_ln, W.ln_f_w, W.ln_f_b, 1, D_MODEL);
+        snprintf(range_name, sizeof(range_name), "prefill_layer_%d", l);
 
-    // logits = buf_ln @ wte^T  — cuBLAS (wte는 FP32)
-    const float alpha = 1.f, beta = 0.f;
-    CUBLAS_CHECK(cublasSgemm(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        VOCAB, 1, D_MODEL,
-        &alpha, W.wte, D_MODEL, buf_ln, D_MODEL,
-        &beta,  buf_logits, VOCAB));
+        nvtxRangePushA(range_name);
+        block_prefill_wmma(
+            handle,
+            buf_x,
+            W,
+            l,
+            buf_ln,
+            buf_qkv,
+            buf_S,
+            buf_O,
+            buf_attn,
+            buf_ff,
+            buf_xh,
+            layer_kv[l],
+            prompt_len
+        );
+        nvtxRangePop();
+    }
+
+    // Final LN + LM head
+    float* last_x = buf_x + (size_t)(prompt_len - 1) * D_MODEL;
+
+    layernorm(
+        last_x,
+        buf_ln,
+        W.ln_f_w,
+        W.ln_f_b,
+        1,
+        D_MODEL
+    );
+
+    const float alpha = 1.f;
+    const float beta  = 0.f;
+
+    CUBLAS_CHECK(cublasSgemm(
+        handle,
+        CUBLAS_OP_T,
+        CUBLAS_OP_N,
+        VOCAB,
+        1,
+        D_MODEL,
+        &alpha,
+        W.wte,
+        D_MODEL,
+        buf_ln,
+        D_MODEL,
+        &beta,
+        buf_logits,
+        VOCAB
+    ));
 
     CUDA_CHECK(cudaDeviceSynchronize());
+
     float* h_logits = (float*)malloc(VOCAB * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(h_logits, buf_logits, VOCAB*sizeof(float), cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaMemcpy(
+        h_logits,
+        buf_logits,
+        VOCAB * sizeof(float),
+        cudaMemcpyDeviceToHost
+    ));
+
     int next = argmax_cpu(h_logits, VOCAB);
+
     free(h_logits);
+
     return next;
 }
 

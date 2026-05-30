@@ -270,9 +270,10 @@ int main(int argc, char** argv) {
     int block_size   = 16;
     int total_blocks = 8192;
 
-    std::vector<int> prompt_lens = {
-        32, 64, 128, 256, 512, 1024
-    };
+    //std::vector<int> prompt_lens = {
+    //    32, 64, 128, 256, 512, 1024
+    //};
+    std::vector<int> prompt_lens = {1024};
 
     if (argc >= 2) {
         warmup_runs = std::atoi(argv[1]);

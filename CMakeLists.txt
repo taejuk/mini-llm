@@ -31,15 +31,23 @@ target_include_directories(gpt2_common_lib PUBLIC
 target_link_libraries(gpt2_common_lib PUBLIC vllm_lib CUDA::cublas)
 
 # ── GPT-2 WMMA (Tensor Core) ─────────────────────────────────────
+set(USE_FLASH_ATTENTION_PREFILL "0" CACHE STRING "Use FlashAttention1-style prefill attention")
+
 add_library(gpt2_wmma_lib
     src/model/gpt2_wmma.cu
     src/kernel/wmma_gemm.cu
+    src/kernel/flashattention1.cu
 )
+
 target_include_directories(gpt2_wmma_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
-target_link_libraries(gpt2_wmma_lib PUBLIC gpt2_common_lib)
 
+target_compile_definitions(gpt2_wmma_lib PRIVATE
+    USE_FLASH_ATTENTION_PREFILL=${USE_FLASH_ATTENTION_PREFILL}
+)
+
+target_link_libraries(gpt2_wmma_lib PUBLIC gpt2_common_lib)
 # ── GPT-2 FP32 모델 ──────────────────────────────────────────────
 add_library(gpt2_fp32_lib
     src/model/gpt2_model.cu
