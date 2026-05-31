@@ -39,23 +39,23 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 }
 
 __device__ __forceinline__ float reduce_dhead64_sum(float partial) {
-    __shared__ float warp_sums[32];
-
-    int lane = threadIdx.x & 31;
-    int warp_id = threadIdx.x >> 5;
-
+    __shared__ float warp_sums[Br][2];
+    int d = threadIdx.x; 
+    int r = threadIdx.y;
+    int warp_id = d / 32;
+    int lane = d % 32;
     float sum = warp_reduce_sum(partial);
-    if(lane == 0) warp_sums[warp_id] = sum;
+    if(lane == 0) warp_sums[r][warp_id] = sum;
     __syncthreads();
 
     float total = 0.0f;
-    if(threadIdx.x == 0) {
-        total = warp_sums[0] + warp_sums[1];
-        warp_sums[0] = total;
+    if(lane == 0) {
+        total = warp_sums[r][0] + warp_sums[r][1];
+        warp_sums[r][0] = total;
     }
     __syncthreads();
 
-    return warp_sums[0];
+    return warp_sums[r][0];
 }
 
 
@@ -140,25 +140,24 @@ __global__ void flashattention1_prefill_kernel(
             else causal = k_abs <= q;
 
             float partial = 0.0f;
-	    bool active = valid_q && valid_k && causal;
+	        bool active = valid_q && valid_k && causal;
             if(active && d < d_head)
                 partial = Q_shared[r*d_head + d] * K_shared[kk * d_head + d];
             
-	    if (d < d_head) {
-                partial_shared[r * d_head + d] = partial;
-            }
-            __syncthreads();
+	        // if (d < d_head) {
+            //     partial_shared[r * d_head + d] = partial;
+            // }
+            // __syncthreads();
 
-            for (int offset = d_head / 2; offset > 0; offset >>= 1) {
-                if (d < offset) {
-                    partial_shared[r * d_head + d] +=
-                        partial_shared[r * d_head + d + offset];
-                }
+            // for (int offset = d_head / 2; offset > 0; offset >>= 1) {
+            //     if (d < offset) {
+            //         partial_shared[r * d_head + d] +=
+            //             partial_shared[r * d_head + d + offset];
+            //     }
 
-                __syncthreads();
-            }
-
-            float score = partial_shared[r * d_head] * scale;
+            //     __syncthreads();
+            // }
+            float score = reduce_dhead64_sum(partial) * scale;
 
             if (active && d < d_head) {
                 float m_new = fmaxf(m, score);
@@ -218,3 +217,4 @@ void flashattention1_prefill(
 
     CUDA_CHECK_FLASH(cudaGetLastError());
 }
+
