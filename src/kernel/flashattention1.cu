@@ -100,33 +100,45 @@ __global__ void flashattention1_prefill_kernel(
 
         int k_tile_last = min(k_start + Bc - 1, seq_len-1);
         bool full_visible_tile = (k_tile_last <= q_start);    
-        for(int i = tid; i < Bc * d_head; i+= nthreads) {
-            int kk = i / d_head;
-            int dd = i % d_head;
+        int d_head_vec4 = d_head / 4;
+        int kv_vec_elems = Bc * d_head_vec4;
 
+        for(int i = tid; i < kv_vec_elems; i+=nthreads) {
+            int kk = i / d_head_vec4;
+            int d4 = i % d_head_vec4;
+
+            int dd = d4 * 4;
             int k_abs = k_start + kk;
 
-            float k_val = 0.0f;
-            float v_val = 0.0f;
+            float4 k4;
+            float4 v4;
 
-            if (k_abs < seq_len) {
-                k_val = buf_qkv[
-                    (size_t)k_abs * 3 * d_model
+            if(k_abs < seq_len) {
+                const float* k_src = buf_qkv
+                    + (size_t)k_abs * 3 * d_model
                     + d_model
                     + hid * d_head
-                    + dd
-                ];
+                    + dd;
 
-                v_val = buf_qkv[
-                    (size_t)k_abs * 3 * d_model
+                const float* v_src = buf_qkv
+                    + (size_t)k_abs * 3 * d_model
                     + 2 * d_model
                     + hid * d_head
-                    + dd
-                ];
+                    + dd;
+                
+                k4 = *reinterpret_cast<const float4*>(k_src);
+                v4 = *reinterpret_cast<const float4*>(v_src);
+
+            } else {
+                k4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+                v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
-            // K^T로 저장하자.
-            K_shared[kk*d_head + dd] = k_val;
-            V_shared[kk*d_head + dd] = v_val;
+
+            float* k_dst = K_shared + kk * d_head + dd;
+            float* v_dst = V_shared + kk * d_head + dd;
+
+            *reinterpret_cast<float4*>(k_dst) = k4;
+            *reinterpret_cast<float4*>(v_dst) = v4;
         }
         __syncthreads();
         // QxK^T를 구한다
