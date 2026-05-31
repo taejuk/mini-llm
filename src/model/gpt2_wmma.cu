@@ -8,7 +8,7 @@
 #include <nvtx3/nvToolsExt.h>
 #include "kernel/flashattention1.cuh"
 
-#ifdef USE_FLASH_ATTENTION_PREFILL
+#ifndef USE_FLASH_ATTENTION_PREFILL
 #define USE_FLASH_ATTENTION_PREFILL 0
 #endif
 

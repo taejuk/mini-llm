@@ -9,6 +9,8 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 70)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
+
+
 add_compile_definitions(WEIGHTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/weights")
 
 # ── vllm 라이브러리 (BlockAllocator + PagedKVCache) ──────────────
@@ -32,6 +34,8 @@ target_link_libraries(gpt2_common_lib PUBLIC vllm_lib CUDA::cublas)
 
 # ── GPT-2 WMMA (Tensor Core) ─────────────────────────────────────
 set(USE_FLASH_ATTENTION_PREFILL "0" CACHE STRING "Use FlashAttention1-style prefill attention")
+set(FA1_BLOCK_M "4" CACHE STRING "FlashAttention1 query tile size")
+set(FA1_BLOCK_N "32" CACHE STRING "FlashAttention1 key/value tile size")
 
 add_library(gpt2_wmma_lib
     src/model/gpt2_wmma.cu
@@ -45,6 +49,8 @@ target_include_directories(gpt2_wmma_lib PUBLIC
 
 target_compile_definitions(gpt2_wmma_lib PRIVATE
     USE_FLASH_ATTENTION_PREFILL=${USE_FLASH_ATTENTION_PREFILL}
+    FA1_BLOCK_M=${FA1_BLOCK_M}
+    FA1_BLOCK_N=${FA1_BLOCK_N}
 )
 
 target_link_libraries(gpt2_wmma_lib PUBLIC gpt2_common_lib)
@@ -103,6 +109,26 @@ target_link_libraries(bench_gpt2_wmma_token_latency PRIVATE
     gpt2_wmma_lib
 )
 
+# ── FlashAttention1 only benchmark ───────────────────────────────
+add_executable(bench_flashattention1_only
+    benchmarks/gpt2/bench_flashattention1_only.cu
+)
+
+target_include_directories(bench_flashattention1_only PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_compile_definitions(bench_flashattention1_only PRIVATE
+    FA1_BLOCK_M=${FA1_BLOCK_M}
+    FA1_BLOCK_N=${FA1_BLOCK_N}
+)
+
+target_link_libraries(bench_flashattention1_only PRIVATE
+    gpt2_wmma_lib
+    CUDA::cudart
+)
+
+
 # ── Unit Tests ───────────────────────────────────────────────────
 enable_testing()
 
@@ -144,6 +170,22 @@ target_include_directories(test_scheduler PRIVATE
 )
 target_link_libraries(test_scheduler PRIVATE scheduler_lib CUDA::cudart)
 add_test(NAME test_scheduler COMMAND test_scheduler)
+
+add_executable(test_flashattention1_correctness
+    test/test_flashattention1_correctness.cu
+)
+
+target_include_directories(test_flashattention1_correctness PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+
+target_link_libraries(test_flashattention1_correctness PRIVATE
+    gpt2_wmma_lib
+    CUDA::cudart
+)
+
+add_test(NAME test_flashattention1_correctness COMMAND test_flashattention1_correctness)
 
 # ── Offline GPT-2 WMMA serving benchmark ───────────────────────
 add_executable(bench_offline_gpt2_wmma
