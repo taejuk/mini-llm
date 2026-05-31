@@ -1,0 +1,1 @@
+variant,attention_impl,use_flash,fa1_block_m,fa1_block_n,prompt_len,gpu_ms_mean,wall_ms_mean,prefill_tok_per_s_gpu,prefill_tok_per_s_wall,speedup_vs_naive_gpu_ms,speedup_vs_naive_wall_ms

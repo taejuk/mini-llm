@@ -1,0 +1,4 @@
+Loading GPT-2 weights (WMMA FP16)... done
+[config] warmup_runs=3 measure_runs=10 block_size=16 total_blocks=8192 max_prompt_len=128
+prompt_len,blocks_per_request_estimate,used_blocks_mean,wall_ms_mean,wall_ms_p50,wall_ms_p95,gpu_ms_mean,gpu_ms_p50,gpu_ms_p95,next_token_last,free_blocks_after
+128,96,96.000,14.340210,14.658691,14.673755,14.332819,14.651104,14.666171,220,8192
