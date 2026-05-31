@@ -26,6 +26,39 @@
         }                                                                  \
     } while (0)
 
+__device__ __forceinline__ float warp_reduce_sum(float val) {
+    unsigned mask = 0xffffffff;
+
+    val += __shfl_down_sync(mask, val, 16);
+    val += __shfl_down_sync(mask, val, 8);
+    val += __shfl_down_sync(mask, val, 4);
+    val += __shfl_down_sync(mask, val, 2);
+    val += __shfl_down_sync(mask, val, 1);
+
+    return val;
+}
+
+__device__ __forceinline__ float reduce_dhead64_sum(float partial) {
+    __shared__ float warp_sums[32];
+
+    int lane = threadIdx.x & 31;
+    int warp_id = threadIdx.x >> 5;
+
+    float sum = warp_reduce_sum(partial);
+    if(lane == 0) warp_sums[warp_id] = sum;
+    __syncthreads();
+
+    float total = 0.0f;
+    if(threadIdx.x == 0) {
+        total = warp_sums[0] + warp_sums[1];
+        warp_sums[0] = total;
+    }
+    __syncthreads();
+
+    return warp_sums[0];
+}
+
+
 __global__ void flashattention1_prefill_kernel(
     const float* __restrict__ buf_qkv,
     float* __restrict__ buf_O,
@@ -36,7 +69,7 @@ __global__ void flashattention1_prefill_kernel(
 ) {
     int hid = blockIdx.x;
     int q_tile = blockIdx.y;
-
+    // O[r][d]요소를 차지한다.
     int d = threadIdx.x; 
     int r = threadIdx.y;  
 
@@ -52,126 +85,84 @@ __global__ void flashattention1_prefill_kernel(
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int nthreads = blockDim.x * blockDim.y;
-
-    /*
-     * 1. Q tile load: [Br, d_head]
-     */
-    int q_elems = Br * d_head;
-
-    for (int idx = tid; idx < q_elems; idx += nthreads) {
-        int rr = idx / d_head;
-        int dd = idx % d_head;
-
-        int q_abs = q_start + rr;
-
-        float val = 0.0f;
-
-        if (q_abs < seq_len) {
-            val = buf_qkv[
-                (size_t)q_abs * 3 * d_model
-                + hid * d_head
-                + dd
-            ];
-        }
-
-        Q_shared[idx] = val;
-    }
-
+    // Q_shared에 저장한다.
+    Q_shared[r * d_head + d] = buf_qkv[(q_start + r)*3*d_model + hid * d_head + d];
     __syncthreads();
-
-    /*
-     * thread 하나가 O[q, hid, d] 하나의 accumulator를 담당
-     */
     float m = -CUDART_INF_F;
     float l = 0.0f;
     float o = 0.0f;
 
-    float q_val = 0.0f;
+    int q_tile_last = min(q_start + Br - 1, seq_len-1);
+    
+    for(int k_start = 0; k_start < seq_len; k_start += Bc) {
+        // K와 V를 가져온다.
+        if(k_start > q_tile_last) break;
 
-    if (q < seq_len && d < d_head) {
-        q_val = Q_shared[r * d_head + d];
-    }
-
-    /*
-     * 2. K/V tile loop
-     */
-    for (int k_start = 0; k_start < seq_len; k_start += Bc) {
-        /*
-         * 2-1. K/V tile load: [Bc, d_head]
-         */
-        int kv_elems = Bc * d_head;
-
-        for (int idx = tid; idx < kv_elems; idx += nthreads) {
-            int kk = idx / d_head;
-            int dd = idx % d_head;
+        int k_tile_last = min(k_start + Bc - 1, seq_len-1);
+        bool full_visible_tile = (k_tile_last <= q_start);    
+        for(int i = tid; i < Bc * d_head; i+= nthreads) {
+            int kk = i / d_head;
+            int dd = i % d_head;
 
             int k_abs = k_start + kk;
 
-            float kval = 0.0f;
-            float vval = 0.0f;
+            float k_val = 0.0f;
+            float v_val = 0.0f;
 
             if (k_abs < seq_len) {
-                kval = buf_qkv[
+                k_val = buf_qkv[
                     (size_t)k_abs * 3 * d_model
                     + d_model
                     + hid * d_head
                     + dd
                 ];
 
-                vval = buf_qkv[
+                v_val = buf_qkv[
                     (size_t)k_abs * 3 * d_model
                     + 2 * d_model
                     + hid * d_head
                     + dd
                 ];
             }
-
-            K_shared[idx] = kval;
-            V_shared[idx] = vval;
+            // K^T로 저장하자.
+            K_shared[kk*d_head + dd] = k_val;
+            V_shared[kk*d_head + dd] = v_val;
         }
-
         __syncthreads();
-
-        /*
-         * 2-2. 현재 K tile 안의 key들을 순회
-         */
-        for (int kk = 0; kk < Bc; kk++) {
+        // QxK^T를 구한다
+        for(int kk = 0; kk < Bc; kk++) {
             int k_abs = k_start + kk;
+            bool valid_q = q < seq_len;
+            bool valid_k = (k_abs < seq_len);
 
-            bool valid = (q < seq_len) && (k_abs < seq_len) && (k_abs <= q);
+            bool causal;
+            if(full_visible_tile) causal = true;
+            else causal = k_abs <= q;
 
-            /*
-             * score = dot(Q[q], K[k])
-             */
             float partial = 0.0f;
-
-            if (valid && d < d_head) {
-                partial = q_val * K_shared[kk * d_head + d];
+	    bool active = valid_q && valid_k && causal;
+            if(active && d < d_head)
+                partial = Q_shared[r*d_head + d] * K_shared[kk * d_head + d];
+            
+	    if (d < d_head) {
+                partial_shared[r * d_head + d] = partial;
             }
-
-            partial_shared[r * d_head + d] = partial;
-
             __syncthreads();
 
-            /*
-             * reduce over d_head
-             */
-            // 이거를 warp reduction으로 최적화하자.
             for (int offset = d_head / 2; offset > 0; offset >>= 1) {
                 if (d < offset) {
                     partial_shared[r * d_head + d] +=
                         partial_shared[r * d_head + d + offset];
                 }
+
                 __syncthreads();
             }
 
             float score = partial_shared[r * d_head] * scale;
 
-            /*
-             * online softmax update
-             */
-            if (valid && d < d_head) {
+            if (active && d < d_head) {
                 float m_new = fmaxf(m, score);
+
                 float alpha = expf(m - m_new);
                 float p = expf(score - m_new);
 
@@ -181,16 +172,11 @@ __global__ void flashattention1_prefill_kernel(
                 l = l * alpha + p;
                 m = m_new;
             }
-
             __syncthreads();
         }
-
         __syncthreads();
     }
 
-    /*
-     * 3. Write O
-     */
     if (q < seq_len && d < d_head) {
         buf_O[
             (size_t)q * d_model
