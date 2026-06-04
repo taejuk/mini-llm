@@ -32,6 +32,24 @@ target_include_directories(gpt2_common_lib PUBLIC
 )
 target_link_libraries(gpt2_common_lib PUBLIC vllm_lib CUDA::cublas)
 
+# -- HF - DEBUG 모드를 추가한다.
+option(ENABLE_TENSOR_DUMP "Enable tensor dump for correctness debugging" OFF)
+
+add_library(tensor_dump_lib
+    src/debug/tensor_dumper.cpp
+)
+
+target_include_directories(tensor_dump_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+target_link_libraries(tensor_dump_lib PUBLIC CUDA::cudart)
+
+if (ENABLE_TENSOR_DUMP)
+    target_compile_definitions(tensor_dump_lib PUBLIC ENABLE_TENSOR_DUMP)
+endif()
+
+
 # ── GPT-2 WMMA (Tensor Core) ─────────────────────────────────────
 set(USE_FLASH_ATTENTION_PREFILL "0" CACHE STRING "Use FlashAttention1-style prefill attention")
 set(FA1_BLOCK_M "4" CACHE STRING "FlashAttention1 query tile size")
@@ -53,7 +71,14 @@ target_compile_definitions(gpt2_wmma_lib PRIVATE
     FA1_BLOCK_N=${FA1_BLOCK_N}
 )
 
-target_link_libraries(gpt2_wmma_lib PUBLIC gpt2_common_lib)
+if (ENABLE_TENSOR_DUMP)
+    target_compile_definitions(gpt2_wmma_lib PUBLIC ENABLE_TENSOR_DUMP)
+endif()
+
+target_link_libraries(gpt2_wmma_lib PUBLIC
+    gpt2_common_lib
+    tensor_dump_lib
+)
 # ── GPT-2 FP32 모델 ──────────────────────────────────────────────
 add_library(gpt2_fp32_lib
     src/model/gpt2_model.cu
@@ -231,3 +256,24 @@ target_link_libraries(bench_gpt2_wmma_prefill_sweep PRIVATE
     gpt2_wmma_lib
     CUDA::cudart
 )
+
+add_executable(test_wmma_vs_hf
+    test/test_wmma_vs_hf.cu
+)
+
+target_include_directories(test_wmma_vs_hf PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/test
+)
+
+target_link_libraries(test_wmma_vs_hf PRIVATE
+    gpt2_wmma_lib
+    tensor_dump_lib
+    CUDA::cudart
+)
+
+if (ENABLE_TENSOR_DUMP)
+    target_compile_definitions(test_wmma_vs_hf PRIVATE ENABLE_TENSOR_DUMP)
+endif()
+
+add_test(NAME test_wmma_vs_hf COMMAND test_wmma_vs_hf)

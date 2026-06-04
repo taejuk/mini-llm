@@ -4,9 +4,6 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
-#ifdef ENABLE_TENSOR_DUMP
-#include "debug/tensor_dumper.h"
-#endif
 
 #define D_MODEL   768
 #define N_HEADS   12
