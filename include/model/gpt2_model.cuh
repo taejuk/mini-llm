@@ -4,6 +4,10 @@
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
 
+#ifdef ENABLE_TENSOR_DUMP
+#include "debug/tensor_dumper.h"
+#endif
+
 #define D_MODEL   768
 #define N_HEADS   12
 #define D_HEAD    64
@@ -37,6 +41,7 @@ private:
   GPT2Weights W;
   cublasHandle_t handle;
 
+
   float* buf_x;
   float* buf_ln;
   float* buf_qkv;
@@ -50,7 +55,18 @@ private:
   int block_size;
   GPT2Model(const char* weight_dir, int blk_size);
 
+#ifdef ENABLE_TENSOR_DUMP
+  TensorDumper* dumper_ = nullptr;
+#endif 
+
 public:
+
+#ifdef ENABLE_TENSOR_DUMP
+  void set_tensor_dumper(TensorDumper* dumper) {
+    dumper_ = dumper;
+  }
+#endif
+
   static void init(const char* weight_dir, int blk_size);
   static GPT2Model& get();
 
