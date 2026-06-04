@@ -519,6 +519,18 @@ int GPT2ModelWMMA::prefill(
     );
     nvtxRangePop();
 
+#ifdef ENABLE_TENSOR_DUMP
+    if(dumper_ && dumper_->enabled()) {
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        dumper_->dump_device_float(
+            "wmma_embedding_out",
+            buf_x,
+            {1, prompt_len, D_MODEL}
+        );
+    }
+#endif
+
     // Transformer layers
     for (int l = 0; l < N_LAYERS; l++) {
         char range_name[64];

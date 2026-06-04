@@ -55,17 +55,8 @@ private:
   int block_size;
   GPT2Model(const char* weight_dir, int blk_size);
 
-#ifdef ENABLE_TENSOR_DUMP
-  TensorDumper* dumper_ = nullptr;
-#endif 
 
 public:
-
-#ifdef ENABLE_TENSOR_DUMP
-  void set_tensor_dumper(TensorDumper* dumper) {
-    dumper_ = dumper;
-  }
-#endif
 
   static void init(const char* weight_dir, int blk_size);
   static GPT2Model& get();

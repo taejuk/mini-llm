@@ -1,4 +1,4 @@
-#include "tensor_dumper.h"
+#include "debug/tensor_dumper.h"
 
 #include <filesystem>
 #include <fstream>
@@ -8,10 +8,11 @@
 
 namespace {
 
-inline void check_cuda(cudaError_t err, const char* what) {
+void check_cuda(cudaError_t err, const char* what) {
     if (err != cudaSuccess) {
-        std::cerr << "[TensorDumper] CUDA error in " << what
-                  << ": " << cudaGetErrorString(err) << "\n";
+        std::cerr << "[TensorDumper] CUDA error in "
+                  << what << ": "
+                  << cudaGetErrorString(err) << "\n";
         throw std::runtime_error(cudaGetErrorString(err));
     }
 }
@@ -90,26 +91,29 @@ void TensorDumper::write_bin(
     const void* data,
     size_t bytes
 ) const {
-    const std::string path = config_.output_dir + "/" + name + ".bin";
+    std::string path = config_.output_dir + "/" + name + ".bin";
 
     std::ofstream ofs(path, std::ios::binary);
     if (!ofs) {
         throw std::runtime_error("[TensorDumper] failed to open " + path);
     }
 
-    ofs.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+    ofs.write(
+        reinterpret_cast<const char*>(data),
+        static_cast<std::streamsize>(bytes)
+    );
 
     if (!ofs) {
         throw std::runtime_error("[TensorDumper] failed to write " + path);
     }
 }
 
-void TensorDumper::write_meta(
+void TensorDumper::write_shape(
     const std::string& name,
     TensorDType dtype,
     const std::vector<int64_t>& shape
 ) const {
-    const std::string path = config_.output_dir + "/" + name + ".shape";
+    std::string path = config_.output_dir + "/" + name + ".shape";
 
     std::ofstream ofs(path);
     if (!ofs) {
@@ -144,15 +148,21 @@ void TensorDumper::dump_host_raw(
 
     ensure_output_dir();
 
-    const size_t n = numel(shape);
-    const size_t bytes = n * dtype_size(dtype);
+    size_t n = numel(shape);
+    size_t bytes = n * dtype_size(dtype);
 
     write_bin(name, h_ptr, bytes);
-    write_meta(name, dtype, shape);
+    write_shape(name, dtype, shape);
 
     std::cerr << "[TensorDumper] dumped host tensor "
-              << name << " numel=" << n
-              << " bytes=" << bytes << "\n";
+              << name << " shape=(";
+
+    for (size_t i = 0; i < shape.size(); i++) {
+        if (i > 0) std::cerr << ", ";
+        std::cerr << shape[i];
+    }
+
+    std::cerr << ") bytes=" << bytes << "\n";
 }
 
 void TensorDumper::dump_device_raw(
@@ -172,8 +182,8 @@ void TensorDumper::dump_device_raw(
 
     ensure_output_dir();
 
-    const size_t n = numel(shape);
-    const size_t bytes = n * dtype_size(dtype);
+    size_t n = numel(shape);
+    size_t bytes = n * dtype_size(dtype);
 
     std::vector<uint8_t> host(bytes);
 
@@ -186,7 +196,7 @@ void TensorDumper::dump_device_raw(
                 cudaMemcpyDeviceToHost,
                 stream
             ),
-            "cudaMemcpyAsync DeviceToHost"
+            "cudaMemcpyAsync"
         );
 
         check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize");
@@ -198,16 +208,22 @@ void TensorDumper::dump_device_raw(
                 bytes,
                 cudaMemcpyDeviceToHost
             ),
-            "cudaMemcpy DeviceToHost"
+            "cudaMemcpy"
         );
     }
 
     write_bin(name, host.data(), bytes);
-    write_meta(name, dtype, shape);
+    write_shape(name, dtype, shape);
 
     std::cerr << "[TensorDumper] dumped device tensor "
-              << name << " numel=" << n
-              << " bytes=" << bytes << "\n";
+              << name << " shape=(";
+
+    for (size_t i = 0; i < shape.size(); i++) {
+        if (i > 0) std::cerr << ", ";
+        std::cerr << shape[i];
+    }
+
+    std::cerr << ") bytes=" << bytes << "\n";
 }
 
 void TensorDumper::dump_device_float(
@@ -228,15 +244,6 @@ void TensorDumper::dump_device_int32(
     dump_device_raw(name, d_ptr, TensorDType::Int32, shape, stream);
 }
 
-void TensorDumper::dump_device_int64(
-    const std::string& name,
-    const int64_t* d_ptr,
-    const std::vector<int64_t>& shape,
-    cudaStream_t stream
-) {
-    dump_device_raw(name, d_ptr, TensorDType::Int64, shape, stream);
-}
-
 void TensorDumper::dump_host_float(
     const std::string& name,
     const float* h_ptr,
@@ -251,12 +258,4 @@ void TensorDumper::dump_host_int32(
     const std::vector<int64_t>& shape
 ) {
     dump_host_raw(name, h_ptr, TensorDType::Int32, shape);
-}
-
-void TensorDumper::dump_host_int64(
-    const std::string& name,
-    const int64_t* h_ptr,
-    const std::vector<int64_t>& shape
-) {
-    dump_host_raw(name, h_ptr, TensorDType::Int64, shape);
 }

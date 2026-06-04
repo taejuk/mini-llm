@@ -17,8 +17,7 @@ struct TensorDumpConfig {
     bool enabled = false;
     std::string output_dir = "mini_ref";
 
-    // 비어 있으면 모든 tensor dump
-    // 특정 이름만 저장하고 싶으면 {"embedding_out", "block0_ln1_out"} 식으로 넣기
+    // 비어 있으면 모든 tensor 저장
     std::unordered_set<std::string> allowlist;
 };
 
@@ -43,13 +42,6 @@ public:
         cudaStream_t stream = nullptr
     );
 
-    void dump_device_int64(
-        const std::string& name,
-        const int64_t* d_ptr,
-        const std::vector<int64_t>& shape,
-        cudaStream_t stream = nullptr
-    );
-
     void dump_host_float(
         const std::string& name,
         const float* h_ptr,
@@ -59,12 +51,6 @@ public:
     void dump_host_int32(
         const std::string& name,
         const int32_t* h_ptr,
-        const std::vector<int64_t>& shape
-    );
-
-    void dump_host_int64(
-        const std::string& name,
-        const int64_t* h_ptr,
         const std::vector<int64_t>& shape
     );
 
@@ -84,7 +70,7 @@ private:
         size_t bytes
     ) const;
 
-    void write_meta(
+    void write_shape(
         const std::string& name,
         TensorDType dtype,
         const std::vector<int64_t>& shape

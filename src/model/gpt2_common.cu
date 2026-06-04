@@ -94,14 +94,6 @@ void embedding_lookup(const int* d_token_ids, const float* wte,
     embedding_kernel<<<seq_len, d_model>>>(
         d_token_ids, wte, wpe, x, seq_len, d_model, pos_offset);
     
-#ifdef ENABLE_TENSOR_DUMP
-    if(dumper_ && dumper_->enabled()) {
-        "embedding_out",
-        x,
-        {seq_len, d_model},
-        
-    }    
-#endif
 }
 
 /* ── Causal Mask ────────────────────────────────────────────── */
