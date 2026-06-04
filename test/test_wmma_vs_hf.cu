@@ -38,11 +38,13 @@ int main(int argc, char** argv) {
     auto& model = GPT2ModelWMMA::get();
 
 #ifdef ENABLE_TENSOR_DUMP
+    #ifndef TENSOR_DUMP_DIR
+    #define TENSOR_DUMP_DIR "mini_ref"
+    #endif
+
     TensorDumpConfig cfg;
     cfg.enabled = true;
-    cfg.output_dir = "mini_ref";
-
-    // 지금은 embedding만 확인
+    cfg.output_dir = TENSOR_DUMP_DIR;
     cfg.allowlist = {
         "wmma_embedding_out"
     };

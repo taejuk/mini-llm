@@ -273,7 +273,10 @@ target_link_libraries(test_wmma_vs_hf PRIVATE
 )
 
 if (ENABLE_TENSOR_DUMP)
-    target_compile_definitions(test_wmma_vs_hf PRIVATE ENABLE_TENSOR_DUMP)
+    target_compile_definitions(test_wmma_vs_hf PRIVATE
+        ENABLE_TENSOR_DUMP
+        TENSOR_DUMP_DIR="${CMAKE_CURRENT_SOURCE_DIR}/mini_ref"
+    )
 endif()
 
 add_test(NAME test_wmma_vs_hf COMMAND test_wmma_vs_hf)
