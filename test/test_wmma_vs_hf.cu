@@ -1,6 +1,5 @@
 #include "model/gpt2_wmma.cuh"
 #include "vllm/kv_cache.cuh"
-
 #ifdef ENABLE_TENSOR_DUMP
 #include "debug/tensor_dumper.h"
 #endif
@@ -10,7 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-
+#include <iostream>
 #define CUDA_CHECK(call)                                                   \
     do {                                                                   \
         cudaError_t e = (call);                                             \
@@ -21,18 +20,19 @@
         }                                                                  \
     } while (0)
 
-#ifndef WEIGHTS_DIR
-#define WEIGHTS_DIR "weights/gpt2"
-#endif
+
 
 int main(int argc, char** argv) {
     constexpr int BLOCK_SIZE = 16;
-
+    constexpr int TOTAL_BLOCKS = 128;
     const char* weight_dir = WEIGHTS_DIR;
 
     if (argc >= 2) {
         weight_dir = argv[1];
     }
+
+    BlockAllocator::getInstance(TOTAL_BLOCKS, BLOCK_SIZE, D_MODEL);
+    std::cout << "[main] allocator ready: " << TOTAL_BLOCKS << " blocks\n";
 
     GPT2ModelWMMA::init(weight_dir, BLOCK_SIZE);
     auto& model = GPT2ModelWMMA::get();
