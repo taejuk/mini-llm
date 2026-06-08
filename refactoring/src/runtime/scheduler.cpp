@@ -1,5 +1,7 @@
 #include "runtime/scheduler.h"
 
+
+namespace mini_llm::runtime {
 Scheduler::~Scheduler() {
     stop();
 }
@@ -14,7 +16,7 @@ void Scheduler::start() {
 
 void Scheduler::stop() {
     running_.store(false);
-    if(worker_.joinable()) worker_.join();
+    //if(worker_.joinable()) worker_.join();
     
 }
 // 여기에 로직이 담겨져 있어야 한다.
@@ -48,4 +50,5 @@ void Scheduler::worker_loop() {
         for(int i = 0; i < reqs.size(); i++) prefill_queue_.push(std::move(reqs[i]));
     }
     // 여기서 호출하면 된다.
+}
 }

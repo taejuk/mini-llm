@@ -8,14 +8,24 @@ constexpr int TM = 8;
 constexpr int TN = 8;
 namespace mini_llm::kernels {
 // C = beta*C + alpha* (AxB);
-__global__ void gemm(
+void launch_gemm(
     int M,
     int N,
     int K,
     float alpha,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
+    const float* A,
+    const float* B,
     float beta,
-    float* __restrict__ C
+    float* C
+);
+// C = A*B + bias
+void launch_gemm_bias(
+    int M,
+    int N,
+    int K,
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* C
 );
 }

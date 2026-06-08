@@ -57,7 +57,7 @@ public:
     ServerContext(const ServerContext&) = delete;
     ServerContext& operator=(const ServerContext&) = delete;
 
-    bool start(const char* host = "0.0.0.0", int port = mini_llm::constant::DEFAULT_PORT);
+    bool start(const char* host = "0.0.0.0", int port = mini_llm::constants::DEFAULT_PORT);
     void run();
     void stop();
 

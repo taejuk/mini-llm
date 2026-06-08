@@ -11,7 +11,7 @@ __global__ void layernorm_kernel(
     float* __restrict__ y,
     int num_rows,
     float eps
-)
+);
 
 void layernorm(
     const float* x,

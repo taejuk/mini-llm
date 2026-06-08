@@ -8,7 +8,6 @@ namespace mini_llm::runtime {
 
 struct BlockTableEntry {
     int logical_id;
-    PhysicalBlock* physicalblock;
 };
 
 class PagedKVCache {

@@ -17,11 +17,10 @@ private:
     : total_blocks(t_blocks){
         size_t slot = (size_t)mini_llm::constants::DEFAULT_KV_BLOCK_SIZE * mini_llm::constants::GPT2_D_MODEL * 2 * sizeof(float);
         cudaMalloc(&pool_, slot * (size_t)t_blocks);
-        float* cur = pool_;
         PhysicalBlock* tail;
         for(int i = 0; i < t_blocks; i++) {
             // head를 연결하고, new를 통해서 block을 생성해야 한다,
-            PhysicalBlock* newblock = new PhysicalBlock(cur, cur + b_size*h_dim);
+            PhysicalBlock* newblock = new PhysicalBlock(i);
             if(head_ == nullptr) head_ = newblock;
             else tail->set_next(newblock);
             tail = newblock;

@@ -2,7 +2,7 @@
 #include "kernels/embedding.cuh"
 #include "kernels/layernorm.cuh"
 #include "kernels/flashattention.cuh"
-
+#include "kernels/qkv_linear.cuh"
 
 namespace mini_llm::model {
 namespace C = mini_llm::constants;
@@ -80,9 +80,22 @@ std::vector<Response> GPT2Model::prefill(std::vector<unique_ptr<Request>>& reqs)
     Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
     
     
-    for(int i = 0; i < GPT2_N_LAYERS; i++) {
+    for(int layer = 0; layer < GPT2_N_LAYERS; layer++) {
         // 
-        // attention 호출
+        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len);
+        // buf_qkv를 만들어야 한다.
+        Kernel::qkv_projection(
+            buf_ln,
+            W.qkv_w[layer],
+            W.qkv_b[layer],
+            buf_qkv,
+            seq_len
+        );
+        // attention 호출   
+        size_t offset = 0;
+        for(const auto& req: reqs) {
+
+        }
     }
 
     
