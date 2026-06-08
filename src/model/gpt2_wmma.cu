@@ -318,6 +318,7 @@ static void block_decode_wmma(cublasHandle_t handle, float* x_row,
                                PagedKVCache& kv, int* d_block_table)
 {
     // Self-attention
+    // 이것도 병렬로 처리할 수 있다.
     layernorm(x_row, buf_ln, W.ln1_w[layer], W.ln1_b[layer], 1, D_MODEL);
     mha_decode(handle, buf_ln,
                W.qkv_w[layer], W.qkv_b[layer],

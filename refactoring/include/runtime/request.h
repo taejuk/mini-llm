@@ -1,0 +1,41 @@
+#pragma once
+
+#include <string>
+#include <sstream>
+#include <vector>
+#include <iostream>
+#include <cuda_runtime.h>
+
+#include "runtime/pagekvcache.h"
+#include "constants.h"
+
+
+namespace mini_llm::runtime {
+struct ClientConnection;
+
+struct Request {
+    uint64_t request_id = -1;
+    std::vector<int> prompts;
+    std::vector<PagedKVCache> layer_kv;
+    int max_new_tokens = 8;
+    // gpu에 저장해야하는 blocktableentry.
+    // pool 시작점과 block_id_만 주면 되니깐 int로 저장해도 된다.
+    int* d_block_tables_;
+    size_t offset;
+    Request() = default;
+
+    Request(int req_id, std::vector<int> t, int max_tokens = 8)
+        : request_id(req_id),
+          prompts(std::move(t)),
+          max_new_tokens(max_tokens),
+          d_block_tables_(nullptr)
+          {
+            // layer_kv 초기화
+            for(int i = 0; i < mini_llm::constants::GPT2_N_LAYERS; i++) layer_kv.emplace_back(req_id);
+            // d_block_tables_e도 초기화해야 함.
+            size_t len_per_pagedkv = (t.size() + max_tokens + mini_llm::constants::DEFAULT_KV_BLOCK_SIZE - 1) / mini_llm::constants::DEFAULT_KV_BLOCK_SIZE;
+            offset = len_per_pagedkv * sizeof(int);
+            cudaMalloc(&d_block_tables_, len_per_pagedkv * mini_llm::constants::GPT2_N_LAYERS * sizeof(int));
+          }
+};
+}

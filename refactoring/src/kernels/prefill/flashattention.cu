@@ -1,42 +1,7 @@
-#include "kernel/flashattention1.cuh"
+#include "kernels/prefill/flashattention.cuh"
 
-#include <cstdio>
-#include <cstdlib>
-#include <cuda_runtime.h>
-#include <math_constants.h>
-
-#ifndef FA1_BLOCK_M
-#define FA1_BLOCK_M 4
-#endif
-
-#ifndef FA1_BLOCK_N
-#define FA1_BLOCK_N 32
-#endif
-
-#define Br FA1_BLOCK_M
-#define Bc FA1_BLOCK_N
-
-#define CUDA_CHECK_FLASH(call)                                             \
-    do {                                                                   \
-        cudaError_t e = (call);                                             \
-        if (e != cudaSuccess) {                                             \
-            fprintf(stderr, "CUDA error %s:%d: %s\n",                      \
-                    __FILE__, __LINE__, cudaGetErrorString(e));            \
-            exit(1);                                                       \
-        }                                                                  \
-    } while (0)
-
-__device__ __forceinline__ float warp_reduce_sum(float val) {
-    unsigned mask = 0xffffffff;
-
-    val += __shfl_down_sync(mask, val, 16);
-    val += __shfl_down_sync(mask, val, 8);
-    val += __shfl_down_sync(mask, val, 4);
-    val += __shfl_down_sync(mask, val, 2);
-    val += __shfl_down_sync(mask, val, 1);
-
-    return val;
-}
+namespace mini_llm::kernels {
+namespace C = mini_llm::constants;
 
 __device__ __forceinline__ float reduce_dhead64_sum(float partial) {
     __shared__ float warp_sums[Br][2];
@@ -58,35 +23,29 @@ __device__ __forceinline__ float reduce_dhead64_sum(float partial) {
     return warp_sums[r][0];
 }
 
-
-__global__ void flashattention1_prefill_kernel(
+__global__ void flashattention_prefill_kernel(
     const float* __restrict__ buf_qkv,
     float* __restrict__ buf_O,
     int seq_len,
-    int d_model,
-    int d_head,
     float scale
 ) {
     int hid = blockIdx.x;
     int q_tile = blockIdx.y;
-    // O[r][d]요소를 차지한다.
-    int d = threadIdx.x; 
-    int r = threadIdx.y;  
 
-    int q_start = q_tile * Br;
-    int q = q_start + r;
+    int d = threadIdx.x;
+    int r = threadIdx.y;
 
     extern __shared__ float smem[];
 
     float* Q_shared = smem;
-    float* K_shared = Q_shared + Br * d_head;
-    float* V_shared = K_shared + Bc * d_head;
-    float* partial_shared = V_shared + Bc * d_head;
+    float* K_shared = Q_shared + Br * C::GPT2_D_HEAD;
+    float* V_shared = K_shared + Bc * C::GPT2_D_HEAD;
+    float* partial_shared = V_shared + Bc * C::GPT2_D_HEAD;
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int nthreads = blockDim.x * blockDim.y;
-    // Q_shared에 저장한다.
-    Q_shared[r * d_head + d] = buf_qkv[(q_start + r)*3*d_model + hid * d_head + d];
+
+    Q_shared[r * C::GPT2_D_HEAD + d] = buf_qkv[(q_start + r)*3*C::GPT2_D_MODEL + hid * C::GPT2_D_HEAD + d];
     __syncthreads();
     float m = -CUDART_INF_F;
     float l = 0.0f;
@@ -100,7 +59,7 @@ __global__ void flashattention1_prefill_kernel(
 
         int k_tile_last = min(k_start + Bc - 1, seq_len-1);
         bool full_visible_tile = (k_tile_last <= q_start);    
-        int d_head_vec4 = d_head / 4;
+        int d_head_vec4 = C::GPT2_D_HEAD / 4;
         int kv_vec_elems = Bc * d_head_vec4;
 
         for(int i = tid; i < kv_vec_elems; i+=nthreads) {
@@ -115,15 +74,15 @@ __global__ void flashattention1_prefill_kernel(
 
             if(k_abs < seq_len) {
                 const float* k_src = buf_qkv
-                    + (size_t)k_abs * 3 * d_model
-                    + d_model
-                    + hid * d_head
+                    + (size_t)k_abs * 3 * C::GPT2_D_MODEL
+                    + C::GPT2_D_MODEL
+                    + hid * C::GPT2_D_HEAD
                     + dd;
 
                 const float* v_src = buf_qkv
-                    + (size_t)k_abs * 3 * d_model
-                    + 2 * d_model
-                    + hid * d_head
+                    + (size_t)k_abs * 3 * C::GPT2_D_MODEL
+                    + 2 * C::GPT2_D_MODEL
+                    + hid * C::GPT2_D_HEAD
                     + dd;
                 
                 k4 = *reinterpret_cast<const float4*>(k_src);
@@ -134,8 +93,8 @@ __global__ void flashattention1_prefill_kernel(
                 v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             }
 
-            float* k_dst = K_shared + kk * d_head + dd;
-            float* v_dst = V_shared + kk * d_head + dd;
+            float* k_dst = K_shared + kk * C::GPT2_D_HEAD + dd;
+            float* v_dst = V_shared + kk * C::GPT2_D_HEAD + dd;
 
             *reinterpret_cast<float4*>(k_dst) = k4;
             *reinterpret_cast<float4*>(v_dst) = v4;
@@ -158,13 +117,13 @@ __global__ void flashattention1_prefill_kernel(
             
             float score = reduce_dhead64_sum(partial) * scale;
 
-            if (active && d < d_head) {
+            if (active && d < C::GPT2_D_HEAD) {
                 float m_new = fmaxf(m, score);
 
                 float alpha = expf(m - m_new);
                 float p = expf(score - m_new);
 
-                float v_val = V_shared[kk * d_head + d];
+                float v_val = V_shared[kk * C::GPT2_D_HEAD + d];
 
                 o = o * alpha + p * v_val;
                 l = l * alpha + p;
@@ -175,45 +134,27 @@ __global__ void flashattention1_prefill_kernel(
         __syncthreads();
     }
 
-    if (q < seq_len && d < d_head) {
+    if (q < seq_len && d < C::GPT2_D_HEAD) {
         buf_O[
-            (size_t)q * d_model
-            + hid * d_head
+            (size_t)q * C::GPT2_D_MODEL
+            + hid * C::GPT2_D_HEAD
             + d
         ] = o / l;
     }
 }
 
-void flashattention1_prefill(
+
+void flashattention_prefill(
     const float* buf_qkv,
     float* buf_O,
     int seq_len,
-    int d_model,
-    int d_head,
-    int n_heads,
     float scale
 ) {
-    if (seq_len <= 0) return;
+    if(seq_len <= 0) return;
 
-    dim3 grid(n_heads, (seq_len + Br - 1) / Br);
-    dim3 block(d_head, Br);
+    dim3 grid(C::GPT2_N_HEADS, (seq_len + Br -1)/ Br);
+    dim3 block(C::GPT2_D_HEAD, Br);
 
-    size_t smem_size =
-        ((size_t)Br * d_head +        // Q_shared
-         (size_t)Bc * d_head +        // K_shared
-         (size_t)Bc * d_head +        // V_shared
-         (size_t)Br * d_head)         // partial_shared
-        * sizeof(float);
-
-    flashattention1_prefill_kernel<<<grid, block, smem_size>>>(
-        buf_qkv,
-        buf_O,
-        seq_len,
-        d_model,
-        d_head,
-        scale
-    );
-
-    CUDA_CHECK_FLASH(cudaGetLastError());
+    flashattention_prefill_kernel<<<grid, block>>>(buf_qkv, buf_O, seq_len, scale);
 }
-
+}
