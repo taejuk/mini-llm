@@ -35,7 +35,9 @@ public:
 
     Pool(const Pool&) = delete;
     Pool& operator=(const Pool&) = delete;
-
+    float* pool_start() {
+        return pool_;
+    }
 
     PhysicalBlock* getBlock() {
         if(head_==nullptr) {

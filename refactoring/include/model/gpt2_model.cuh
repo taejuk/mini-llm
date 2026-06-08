@@ -34,10 +34,20 @@ private:
     float* buf_ff;
     float* buf_logits;
 
-    int* d_block_table;
     int* d_tokens;
     int* d_pos;
+    int* d_block_table;
+    int* d_token_to_block;
+    int* d_token_to_offset;
+
+    int* h_token_to_block;
+    int* h_token_to_offset;
+    int* h_tokens;
+    int* h_pos;
+    
+    float* pool;
     GPT2Model();
+    void make_tables(std::vector<unique_ptr<Request>>& reqs, int layer);
 
 public:
     static GPT2Model& get();
