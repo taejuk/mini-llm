@@ -30,8 +30,10 @@ private:
     float* buf_x;
     float* buf_ln;
     float* buf_qkv;
-    float* buf_attn;
+    float* buf_attn_out;
+    float* buf_proj;
     float* buf_ff;
+    
     float* buf_logits;
 
     int* d_tokens;
@@ -48,7 +50,7 @@ private:
     float* pool;
     GPT2Model();
     void make_tables(std::vector<unique_ptr<Request>>& reqs, int layer);
-
+    void block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer);
 public:
     static GPT2Model& get();
 

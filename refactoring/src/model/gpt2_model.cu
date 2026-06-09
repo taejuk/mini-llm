@@ -19,7 +19,7 @@ static GPT2Weights load_weights() {
     snprintf(path, 512, "%s/%s", WEIGHTS_DIR, fname); ptr = load_bin(path, (size_t)(n));
     LOAD(W.wte, "wte.bin", (size_t)C::GPT2_VOCAB_SIZE*C::GPT2_D_MODEL);
     LOAD(W.wpe, "wpe.bin", (size_t)C::MAX_SEQ*C::GPT2_D_MODEL);
-    for (int l = 0; l < GPT2_N_LAYERS; l++) {
+    for (int l = 0; l < C::GPT2_N_LAYERS; l++) {
         char nm[64];
         snprintf(nm,64,"ln1_w_%d.bin",l); LOAD(W.ln1_w[l], nm, C::GPT2_D_MODEL);
         snprintf(nm,64,"ln1_b_%d.bin",l); LOAD(W.ln1_b[l], nm, C::GPT2_D_MODEL);
@@ -46,7 +46,8 @@ GPT2Model::GPT2Model() {
     cudaMalloc(&buf_x, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_ln, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_qkv, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * 3 * sizeof(float));
-    cudaMalloc(&buf_attn, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL  * sizeof(float));
+    cudaMalloc(&buf_attn_out, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_proj, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_ff, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_FF * sizeof(float));
     cudaMalloc(&buf_logits, C::GPT2_VOCAB_SIZE * sizeof(float));
     cudaMalloc(&d_tokens, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
@@ -83,10 +84,50 @@ void GPT2Model::make_tables(std::vector<unique_ptr<Request>>& reqs, int layer) {
             cur++;
         }
     }
-    cudaMemcpy(d_token_to_block, h_token_to_block, cur * sizeof(int));
-    cudaMemcpy(d_token_to_offset, h_token_to_offset, cur * sizeof(int))
+    cudaMemcpy(d_token_to_block, h_token_to_block, cur * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_token_to_offset, h_token_to_offset, cur * sizeof(int), cudaMemcpyHostToDevice);
 }
 
+
+void GPT2Model::block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer) {
+Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
+        // buf_qkv를 만들어야 한다.
+        Kernel::qkv_projection(
+            buf_ln,
+            W.qkv_w[layer],
+            W.qkv_b[layer],
+            buf_qkv,
+            seq_len
+        );
+        // buf_qkv를 저장하는 것은 모든 request가 같이하는게 낫다.
+        make_tables(reqs, layer);
+        Kernel::append_prefill_kv(buf_qkv, pool, d_token_to_block, d_token_to_offset, seq_len);
+        // attention 호출
+        int before_tokens = 0;   
+        float scale = 1.0f / sqrtf(static_cast<float>(mini_llm::constants::GPT2_D_HEAD));
+        for(const auto& req: reqs) {
+            int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
+            int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
+            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts.size(), scale);
+        }
+        // output projection을 한다.
+        Kernel::linear(
+            buf_attn_out,
+            W.out_w[layer],
+            W.out_b[layer],
+            buf_proj,
+            seq_len,
+            mini_llm::constants::GPT2_D_MODEL,
+            mini_llm::constants::GPT2_D_MODEL
+        );
+
+        Kernel::residual_add(buf_x, buf_proj, (size_t)seq_len * mini_llm::constants::GPT2_D_MODEL);
+        Kernel::layernorm(buf_x, W.ln2_w[layer], W.ln2_b[layer], buf_ln ,seq_len, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::linear(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, mini_llm::constants::GPT2_D_MODEL, mini_llm::constants::GPT2_D_FF);
+        Kernel::gelu(buf_ff, seq_len * mini_llm::constants::GPT2_D_FF);
+        Kernel::linear(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_proj, seq_len, mini_llm::constants::GPT2_D_FF, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::residual_add(buf_x, buf_proj, seq_len * mini_llm::constants::GPT2_D_MODEL);
+}
 
 std::vector<Response> GPT2Model::prefill(std::vector<unique_ptr<Request>>& reqs) {
     size_t seq_len = 0;
@@ -108,47 +149,10 @@ std::vector<Response> GPT2Model::prefill(std::vector<unique_ptr<Request>>& reqs)
     
     // block prefill을 여기서 해야한다.
     for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
-        // 
-        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
-        // buf_qkv를 만들어야 한다.
-        Kernel::qkv_projection(
-            buf_ln,
-            W.qkv_w[layer],
-            W.qkv_b[layer],
-            buf_qkv,
-            seq_len
-        );
-        // buf_qkv를 저장하는 것은 모든 request가 같이하는게 낫다.
-        make_tables(reqs, layer);
-        Kernel::append_prefill_kv(buf_qkv, pool, d_token_to_block, d_token_to_offset, seq_len);
-        // attention 호출
-        int before_tokens = 0;   
-        float scale = 1.0f / sqrtf(static_cast<float>(mini_llm::constants::GPT2_D_HEAD));
-        for(const auto& req: reqs) {
-            int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
-            int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
-            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_O + buf_O_offset, req->prompts.size(), scale);
-        }
-        // output projection을 한다.
-        Kernel::linear(
-            buf_O,
-            W.out_w[layer],
-            W.out_b[layer],
-            buf_attn,
-            seq_len,
-            mini_llm::constants::GPT2_D_MODEL,
-            mini_llm::constants::GPT2_D_MODEL
-        );
-
-        Kernel::residual_add(buf_x, buf_attn, (size_t)seq_len * mini_llm::constants::GPT2_D_MODEL);
-        Kernel::layernorm(buf_x, W.ln2_w[layer], W.ln2_b[layer], seq_len, mini_llm::constants::GPT2_D_MODEL);
-        Kernel::linear(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, mini_llm::constants::GPT2_D_MODEL, mini_llm::constants::GPT2_D_FF);
-        Kernel::gelu(buf_ff, seq_len * mini_llm::constants::GPT2_D_FF);
-        Kernel::linear(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn, seq_len, mini_llm::constants::GPT2_D_FF, mini_llm::constants::GPT2_D_MODEL);
-        Kernel::residual_add(buf_x, buf_attn, seq_len * mini_llm::constants::GPT2_D_MODEL);
+        block_prefill(reqs, seq_len, layer);
     }
 
-    
+    return {};
 }
 
 
