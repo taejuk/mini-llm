@@ -4,6 +4,8 @@
 #include "kernels/flashattention.cuh"
 #include "kernels/qkv_linear.cuh"
 #include "kernels/prefill/append_kv.cuh"
+#include "kernels/residual.cuh"
+
 
 #include "runtime/pagekvcache.h"
 #include "runtime/pool.cuh"
@@ -104,10 +106,10 @@ std::vector<Response> GPT2Model::prefill(std::vector<unique_ptr<Request>>& reqs)
     // 1. embedding 호출
     Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
     
-    
+    // block prefill을 여기서 해야한다.
     for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
         // 
-        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len);
+        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
         // buf_qkv를 만들어야 한다.
         Kernel::qkv_projection(
             buf_ln,
@@ -121,11 +123,29 @@ std::vector<Response> GPT2Model::prefill(std::vector<unique_ptr<Request>>& reqs)
         Kernel::append_prefill_kv(buf_qkv, pool, d_token_to_block, d_token_to_offset, seq_len);
         // attention 호출
         int before_tokens = 0;   
+        float scale = 1.0f / sqrtf(static_cast<float>(mini_llm::constants::GPT2_D_HEAD));
         for(const auto& req: reqs) {
             int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
             int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
-            
+            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_O + buf_O_offset, req->prompts.size(), scale);
         }
+        // output projection을 한다.
+        Kernel::linear(
+            buf_O,
+            W.out_w[layer],
+            W.out_b[layer],
+            buf_attn,
+            seq_len,
+            mini_llm::constants::GPT2_D_MODEL,
+            mini_llm::constants::GPT2_D_MODEL
+        );
+
+        Kernel::residual_add(buf_x, buf_attn, (size_t)seq_len * mini_llm::constants::GPT2_D_MODEL);
+        Kernel::layernorm(buf_x, W.ln2_w[layer], W.ln2_b[layer], seq_len, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::linear(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, mini_llm::constants::GPT2_D_MODEL, mini_llm::constants::GPT2_D_FF);
+        Kernel::gelu(buf_ff, seq_len * mini_llm::constants::GPT2_D_FF);
+        Kernel::linear(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn, seq_len, mini_llm::constants::GPT2_D_FF, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::residual_add(buf_x, buf_attn, seq_len * mini_llm::constants::GPT2_D_MODEL);
     }
 
     

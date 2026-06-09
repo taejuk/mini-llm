@@ -57,13 +57,11 @@ void layernorm(
     const float* beta,
     float* y,
     int num_rows,
+    int num_cols,
     float eps = 1e-5f
 ) {
-    constexpr int D = mini_llm::constants::GPT2_D_MODEL;
-    constexpr int VEC = 4;
-    constexpr int THREADS = D / VEC;
-
-    static_assert(D % VEC == 0, "D_MODEL must be divisible by 4");
+    int VEC = 4;
+    int THREADS = num_cols / VEC;
 
     if (num_rows <= 0) {
         return;
@@ -72,7 +70,7 @@ void layernorm(
     dim3 grid(num_rows);
     dim3 block(THREADS);
 
-    layernorm_kernel<<<grid, block, 0, stream>>>(
+    layernorm_kernel<<<grid, block>>>(
         x,
         gamma,
         beta,
