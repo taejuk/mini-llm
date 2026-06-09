@@ -49,7 +49,7 @@ GPT2Model::GPT2Model() {
     cudaMalloc(&buf_attn_out, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_proj, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_ff, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_FF * sizeof(float));
-    cudaMalloc(&buf_x_last, C::MAX_BATCH_NUM * C::GPT2_D_MODEL);
+    cudaMalloc(&buf_x_last, C::MAX_BATCH_NUM * C::GPT2_D_MODEL * sizeof(float));
     cudaMalloc(&buf_logits, C::MAX_BATCH_NUM * C::GPT2_VOCAB_SIZE * sizeof(float));
     cudaMalloc(&d_tokens, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
     cudaMalloc(&d_pos, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
@@ -100,7 +100,7 @@ void GPT2Model::gather_last_tokens(std::vector<unique_ptr<Request>>& reqs) {
 }
 
 void GPT2Model::block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer) {
-Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
         // buf_qkv를 만들어야 한다.
         Kernel::qkv_projection(
             buf_ln,
@@ -119,6 +119,7 @@ Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_l
             int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
             int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
             Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts.size(), scale);
+            before_tokens += req->prompts.size();
         }
         // output projection을 한다.
         Kernel::linear(
@@ -144,7 +145,7 @@ static std::vector<int> argmax_cpu(const float* v, int row, int col) {
     for(int r = 0; r < row; r++) {
         int best = 0;
         for(int i = 1; i < col; i++)
-            if(v[r * row + best] < v[r * row + i]) best = i;
+            if(v[r * col + best] < v[r * col + i]) best = i;
         result.push_back(best);
     }
     return result;
@@ -174,9 +175,18 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>
     }
     // last block을 가져와서 합쳐야 한다.
     gather_last_tokens(reqs);
-    Kernel::layernorm(buf_last_x, W.ln_f_w, W.ln_f_b, buf_ln,reqs.size(), mini_llm::constants::GPT2_D_MODEL);
-    Kernel::launch_gemm(mini_llm::constants::GPT2_VOCAB_SIZE, reqs.size(), mini_llm::constants::GPT2_D_MODEL, 1.0f, W.wte, buf_ln, 0.0f, buf_logits);
-    float* h_logits = (float*)malloc(mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float));
+    Kernel::layernorm(buf_x_last, W.ln_f_w, W.ln_f_b, buf_ln,reqs.size(), mini_llm::constants::GPT2_D_MODEL);
+    Kernel::launch_gemm(
+        reqs.size(),              // M = batch
+        C::GPT2_VOCAB_SIZE,       // N = vocab
+        C::GPT2_D_MODEL,          // K = hidden
+        1.0f,
+        buf_ln,                   // [B, D]
+        W.wte_t,                  // [D, V]
+        0.0f,
+        buf_logits                // [B, V]
+    );
+    float* h_logits = new float[mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size()];
     cudaMemcpy(h_logits, buf_logits, mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float), cudaMemcpyDeviceToHost);
     std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
     std::vector<Rt::Response> result;
@@ -184,7 +194,7 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>
         bool done = reqs[i]->max_new_tokens <= 1;
         result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
     }
-    
+    delete[] h_logits;
     return result;
 }
 

@@ -5,7 +5,7 @@
 #include "constants.h"
 
 namespace mini_llm::model {
-struct GPT2Weigts {
+struct GPT2Weights {
     float* wte;
     float* wpe;
     float* ln1_w[mini_llm::constants::GPT2_N_LAYERS];
@@ -26,7 +26,7 @@ struct GPT2Weigts {
 
 class GPT2Model {
 private:
-    GPT2Weigts W;
+    GPT2Weights W;
     float* buf_x;
     float* buf_ln;
     float* buf_qkv;
@@ -50,9 +50,9 @@ private:
     
     float* pool;
     GPT2Model();
-    void make_tables(std::vector<unique_ptr<Request>>& reqs, int layer);
-    void block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer);
-    void gather_last_tokens(std::vector<unique_ptr<Request>>& reqs);
+    void make_tables(std::vector<std::unique_ptr<Request>>& reqs, int layer);
+    void block_prefill(std::vector<std::unique_ptr<Request>>& reqs, int seq_len, int layer);
+    void gather_last_tokens(std::vector<std::unique_ptr<Request>>& reqs);
 public:
     static GPT2Model& get();
 
