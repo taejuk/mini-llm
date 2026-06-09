@@ -19,6 +19,7 @@ void layernorm(
     const float* beta,
     float* y,
     int num_rows,
+    int num_cols,
     float eps = 1e-5f
 );
 

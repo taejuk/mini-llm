@@ -33,6 +33,7 @@ private:
     float* buf_attn_out;
     float* buf_proj;
     float* buf_ff;
+    float* buf_x_last;
     
     float* buf_logits;
 
@@ -51,6 +52,7 @@ private:
     GPT2Model();
     void make_tables(std::vector<unique_ptr<Request>>& reqs, int layer);
     void block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer);
+    void gather_last_tokens(std::vector<unique_ptr<Request>>& reqs);
 public:
     static GPT2Model& get();
 
