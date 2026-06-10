@@ -16,8 +16,12 @@ add_library(mini_llm_kernels
     src/kernels/gemm.cu
     src/kernels/embedding.cu
     src/kernels/layernorm.cu
+    src/kernels/residual.cu
+    src/kernels/gelu.cu
+    src/kernels/prefill/append_kv.cu
     src/kernels/prefill/flashattention.cu
 )
+
 target_include_directories(mini_llm_kernels PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include    
 )
@@ -62,4 +66,29 @@ target_include_directories(mini_llm PRIVATE
 target_link_libraries(mini_llm PRIVATE
     mini_llm_runtime
 )
+
+# 테스트 파일 생성
+enable_testing()
+
+add_compile_definitions(TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/kernels")
+
+function(add_kernel_test name src)
+    add_executable(${name} ${src})
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+    )
+    target_link_libraries(${name} PRIVATE
+        mini_llm_kernels
+        CUDA::cudart
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+add_kernel_test(test_residual tests/cpp/test_residual.cu)
+add_kernel_test(test_gelu tests/cpp/test_gelu.cu)
+add_kernel_test(test_layernorm tests/cpp/test_layernorm.cu)
+add_kernel_test(test_gemm tests/cpp/test_gemm.cu)
+add_kernel_test(test_embedding tests/cpp/test_embedding.cu)
+add_kernel_test(test_append_kv tests/cpp/test_append_kv.cu)
 

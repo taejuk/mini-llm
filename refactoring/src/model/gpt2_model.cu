@@ -72,7 +72,7 @@ GPT2Model& GPT2Model::get() {
     return gpt2_model;
 }
 // buf_qkv를 채우기위한 table을 만든다.
-void GPT2Model::make_tables(std::vector<unique_ptr<Request>>& reqs, int layer) {
+void GPT2Model::make_tables(std::vector<unique_ptr<Rt::Request>>& reqs, int layer) {
     size_t cur = 0;
     for(const auto& req: reqs) {
         int tokens_size = req->prompts.size();
@@ -89,7 +89,7 @@ void GPT2Model::make_tables(std::vector<unique_ptr<Request>>& reqs, int layer) {
     cudaMemcpy(d_token_to_offset, h_token_to_offset, cur * sizeof(int), cudaMemcpyHostToDevice);
 }
 
-void GPT2Model::gather_last_tokens(std::vector<unique_ptr<Request>>& reqs) {
+void GPT2Model::gather_last_tokens(std::vector<unique_ptr<Rt::Request>>& reqs) {
     int offset = 0;
     int idx = 0;
     for(const auto& req: reqs) {
@@ -99,7 +99,7 @@ void GPT2Model::gather_last_tokens(std::vector<unique_ptr<Request>>& reqs) {
     }
 }
 
-void GPT2Model::block_prefill(std::vector<unique_ptr<Request>>& reqs, int seq_len, int layer) {
+void GPT2Model::block_prefill(std::vector<unique_ptr<Rt::Request>>& reqs, int seq_len, int layer) {
         Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
         // buf_qkv를 만들어야 한다.
         Kernel::qkv_projection(

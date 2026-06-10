@@ -2,6 +2,9 @@
 
 
 namespace mini_llm::runtime {
+
+namespace C = mini_llm::constants;
+
 Scheduler::~Scheduler() {
     stop();
 }
@@ -38,11 +41,32 @@ void Scheduler::worker_loop() {
         // decode에 대해서 먼저 처리한다.
         // 이 때 empty가 아니라 for문으로 한번 돈다.
         //while(!decode_queue_.empty()){}
+        std::queue<std::unique_ptr<Request>> new_decode_queue;
+        for(int i = 0; i < decode_queue_.size(); i++) {
+            // BATCH_NUM까지 꺼낸다.
+
+            // batch_decode를 실행한다.
+
+            // response를 보고 done인지 아닌지 판단한 후에,
+            // done이면 free하고 queue에 안 넣는다.
+
+            // done이 아니면 다시 queue에 넣는다.
+        }
         
         // prefill에 대해서 처리한다.
         //while(!prefill_queue_.empty()) {}
-        for(int i = 0; i < )
+        for(int i = 0; i < prefill_queue_.size(); i++) {
+            // BATCH NUM까지 꺼낸다.
+
+            // batch_prefill을 실행한다.
+
+            // response를 보고 done인지 아닌지 판단한 후에,
+            // done이면 free하고 new_decode_queue 안 넣는다.
+
+            // done이 아니면 다시 new_decode_queue 넣는다.
+        }
         // 들어온 response들을 drain한다.
+        
         std::optional<std::unique_ptr<Request>> req_opt = request_queue_.wait_pop();
         if(!req_opt.has_value()) break;
         std::vector<std::unique_ptr<Request>> reqs;

@@ -1,32 +1,33 @@
-import numpy as np
-from pathlib import Path
 import json
+from pathlib import Path
 
-def layernorm(x, gamma, beta, eps):
-    row_mean = np.mean(x, axis=1)
-    # 각 row의 평균을 뺸다.
+import numpy as np
 
-    # 분산을 구한다.
-
-    # gamma와 beta를 구한다.
 out = Path(__file__).parent
-N = 1027
-M = 4096
 
-x = np.random.rand(N, M)
-gamma = np.random.rand(N, M)
-beta = np.random.rand(N, M)
-eps = 1e-9
+ROWS = 17
+COLS = 768
+EPS = 1e-5
 
-expected = layernorm(x, gamma, beta, eps)
+rng = np.random.default_rng(0)
+
+x = rng.normal(0.0, 1.0, size=(ROWS, COLS)).astype(np.float32)
+gamma = rng.normal(1.0, 0.1, size=(COLS,)).astype(np.float32)
+beta = rng.normal(0.0, 0.1, size=(COLS,)).astype(np.float32)
+
+mean = x.mean(axis=1, keepdims=True)
+var = ((x - mean) ** 2).mean(axis=1, keepdims=True)
+expected = ((x - mean) / np.sqrt(var + EPS)) * gamma + beta
+expected = expected.astype(np.float32)
 
 x.tofile(out / "input_x.bin")
 gamma.tofile(out / "input_gamma.bin")
 beta.tofile(out / "input_beta.bin")
 expected.tofile(out / "expected.bin")
 
-
 (out / "meta.json").write_text(json.dumps({
-    "N": N,
-    "M": M
-}))
+    "rows": ROWS,
+    "cols": COLS,
+    "eps": EPS,
+    "dtype": "float32"
+}, indent=2))

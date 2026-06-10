@@ -365,47 +365,4 @@ void ServerContext::start_write(ClientConnection* client) {
         delete write_req;
     }
 }
-
-// void ServerContext::gpu_worker_loop() {
-//     while (running_.load()) {
-//         // 여기까지만 넣고     
-//         std::vector<std::unique_ptr<Request>> reqs;
-//         std::optional<std::unique_ptr<Request>> req_opt = request_queue_.wait_pop();
-//         if(!req_opt.has_value()) break;
-//         reqs.push_back(std::move(req_opt.value()));
-//         std::this_thread::sleep_for(std::chrono::milliseconds(BATCH_TIME));
-//         request_queue_.drain(reqs);
-//         // 여기서 Request를 만들어서 Request Pool에 넣자.
-//         for(int i = 0; i < reqs.size(); i++) {
-//             std::unique_ptr<Request> req = std::move(reqs[i]);
-//             std::string log = "[gpu_worker] " + std::to_string(req->request_id) + " request tokens: " + tokensToString(req->tokens);
-//             std::cout << log << "\n";
-//             for(int j = 0; j < req->max_new_tokens; j++) {
-//                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
-//                 std::vector<int> out_token;
-//                 out_token.push_back(1000+j);
-
-//                 Response resp(
-//                     req->request_id,
-//                     std::move(out_token),
-//                     false
-//                 );
-
-//                 submit_response(resp);
-//             }
-
-//             Response done(
-//                 req->request_id,
-//                 {},
-//                 true
-//             );
-//             submit_response(std::move(done));
-//         }       
-
-//     }
-
-//     std::cout << "[gpu_worker] stopped\n";
-// }
-
-
 }
