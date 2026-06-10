@@ -2,6 +2,7 @@
 #include <cuda_runtime.h>
 
 #include "runtime/pagekvcache.h"
+#include "runtime/block_manager.h"
 #include "constants.h"
 
 namespace mini_llm::model {
@@ -48,8 +49,10 @@ private:
     int* h_token_to_offset;
     int* h_tokens;
     int* h_pos;
+    float* h_logits;
     
     float* pool;
+    Rt::BlockManager block_manager;
     GPT2Model();
     void make_tables(std::vector<std::unique_ptr<Rt::Request>>& reqs, int layer);
     void block_prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs, int seq_len, int layer);
@@ -60,8 +63,8 @@ public:
     GPT2Model(const GPT2Model&) = delete;
     GPT2Model& operator=(const GPT2Model&) = delete;
 
-    std::vector<Response> prefill(std::vector<unique_ptr<Rt::Request>>& reqs);
-    std::vector<Response> decode(std::vector<unique_ptr<Rt::Request>>& reqs);
+    std::vector<Rt::Response> prefill(std::vector<unique_ptr<Rt::Request>>& reqs);
+    std::vector<Rt::Response> decode(std::vector<unique_ptr<Rt::Request>>& reqs);
 };
 
 

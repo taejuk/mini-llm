@@ -8,7 +8,6 @@ private:
     int id_;
     int filled_ = 0;
     int refcount_ = 0;
-
 public:
     PhysicalBlock(int id)
         : id_(id) {}

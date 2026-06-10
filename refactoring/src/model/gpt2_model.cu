@@ -8,6 +8,7 @@
 
 #include "runtime/pagekvcache.h"
 #include "runtime/pool.cuh"
+#include "runtime/block_manager.h"
 
 namespace mini_llm::model {
 namespace C = mini_llm::constants;
@@ -59,12 +60,12 @@ GPT2Model::GPT2Model() {
     h_token_to_offset = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
     h_tokens = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
     h_pos = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
+    h_logits = new float[C::GPT2_VOCAB_SIZE * C::MAX_BATCH_NUM];
     int max_blocks = (C::MAX_BATCH_NUM * C::MAX_SEQ) / C::DEFAULT_KV_BLOCK_SIZE + 1;
 
     cudaMalloc(&d_block_table, max_blocks * sizeof(int));
     pool = mini_llm::runtime::Pool::getInstance().pool_start();
-
-    
+    block_manager = mini_llm::runtime::BlockManager::getInstance(mini_llm::runtime::Pool::getInstance());
 }
 
 GPT2Model& GPT2Model::get() {
@@ -171,6 +172,8 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>
     
     // block prefill을 여기서 해야한다.
     for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
+        // layer마다 block을 직접 할당한다.
+
         block_prefill(reqs, seq_len, layer);
     }
     // last block을 가져와서 합쳐야 한다.
@@ -186,15 +189,35 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>
         0.0f,
         buf_logits                // [B, V]
     );
-    float* h_logits = new float[mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size()];
     cudaMemcpy(h_logits, buf_logits, mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float), cudaMemcpyDeviceToHost);
     std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
     std::vector<Rt::Response> result;
     for(int i = 0; i < reqs.size(); i++) {
+        reqs[i]->tokens.push_back(output_tokens[i]);
         bool done = reqs[i]->max_new_tokens <= 1;
         result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
     }
-    delete[] h_logits;
+    return result;
+}
+
+std::vector<Rt::Response> GPT2Model::decode(std::vector<unique_ptr<Rt::Request>>& reqs) {
+    size_t seq_len = reqs.size();
+    // 마지막 token들을 가져온다.
+
+    // 마지막 pos도 가져온다.
+    // h_token과 h_pos를 만든다.
+    for(int i = 0; i < reqs.size(); i++) {
+        h_tokens[i] = reqs[i]->tokens.back();
+        h_pos[i] = reqs[i]->tokens.size();
+    }
+    int size = seq_len*sizeof(int);
+    cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
+    // embedding_lookup을 한다.
+    Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
+    // blcok prefill하면서 새로 만들어진 token을 저장한다.
+    // make_tables를 똑같이 쓰면 안된다.
+    std::vector<Rt::Response> result;
     return result;
 }
 
