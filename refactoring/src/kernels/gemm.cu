@@ -1,7 +1,6 @@
 #include "kernels/gemm.cuh"
 
-
-namespace mini_llm::kernels{
+namespace mini_llm::kernels {
 
 __global__ void gemm_kernel(
     int M,
@@ -13,7 +12,6 @@ __global__ void gemm_kernel(
     float beta,
     float* __restrict__ C
 ) {
-
     const int cRow = blockIdx.y;
     const int cCol = blockIdx.x;
 
@@ -33,6 +31,13 @@ __global__ void gemm_kernel(
     float regB[TN];
 
     for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
+        // ------------------------------------------------------------
+        // Load A tile: A[M, K] -> sA[BK, BM]
+        //
+        // 기존 float4 global load는 K가 4의 배수가 아닐 때
+        // row start가 16-byte align되지 않아 misaligned address 가능.
+        // 따라서 global load는 scalar로 안전하게 처리.
+        // ------------------------------------------------------------
         const int numAFloat4 = (BM * BK) / 4;
 
         for (int i = threadIdx.x; i < numAFloat4; i += numThreads) {
@@ -45,31 +50,29 @@ __global__ void gemm_kernel(
             int globalColA = bkIdx + colA4 * 4;
 
             float4 tmp;
+            tmp.x = 0.0f;
+            tmp.y = 0.0f;
+            tmp.z = 0.0f;
+            tmp.w = 0.0f;
 
-            bool can_vec_load =
-                (globalRowA < M) &&
-                (globalColA + 3 < K);
+            if (globalRowA < M) {
+                size_t base =
+                    static_cast<size_t>(globalRowA) *
+                    static_cast<size_t>(K) +
+                    static_cast<size_t>(globalColA);
 
-            if (can_vec_load) {
-                tmp = reinterpret_cast<const float4*>(
-                    &A[globalRowA * K + globalColA]
-                )[0];
-            } else {
-                float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int gc = globalColA + t;
-
-                    if (globalRowA < M && gc < K) {
-                        vals[t] = A[globalRowA * K + gc];
-                    }
+                if (globalColA + 0 < K) {
+                    tmp.x = A[base + 0];
                 }
-
-                tmp.x = vals[0];
-                tmp.y = vals[1];
-                tmp.z = vals[2];
-                tmp.w = vals[3];
+                if (globalColA + 1 < K) {
+                    tmp.y = A[base + 1];
+                }
+                if (globalColA + 2 < K) {
+                    tmp.z = A[base + 2];
+                }
+                if (globalColA + 3 < K) {
+                    tmp.w = A[base + 3];
+                }
             }
 
             sA[(colA4 * 4 + 0) * BM + rowA] = tmp.x;
@@ -78,6 +81,12 @@ __global__ void gemm_kernel(
             sA[(colA4 * 4 + 3) * BM + rowA] = tmp.w;
         }
 
+        // ------------------------------------------------------------
+        // Load B tile: B[K, N] -> sB[BK, BN]
+        //
+        // N이 4의 배수가 아닐 수 있으므로 B도 scalar load.
+        // GPT2 vocab size 50257도 4의 배수가 아니어서 중요함.
+        // ------------------------------------------------------------
         const int numBFloat4 = (BK * BN) / 4;
 
         for (int i = threadIdx.x; i < numBFloat4; i += numThreads) {
@@ -90,31 +99,29 @@ __global__ void gemm_kernel(
             int globalColB = blockCol + colB4 * 4;
 
             float4 tmp;
+            tmp.x = 0.0f;
+            tmp.y = 0.0f;
+            tmp.z = 0.0f;
+            tmp.w = 0.0f;
 
-            bool can_vec_load =
-                (globalRowB < K) &&
-                (globalColB + 3 < N);
+            if (globalRowB < K) {
+                size_t base =
+                    static_cast<size_t>(globalRowB) *
+                    static_cast<size_t>(N) +
+                    static_cast<size_t>(globalColB);
 
-            if (can_vec_load) {
-                tmp = reinterpret_cast<const float4*>(
-                    &B[globalRowB * N + globalColB]
-                )[0];
-            } else {
-                float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int gc = globalColB + t;
-
-                    if (globalRowB < K && gc < N) {
-                        vals[t] = B[globalRowB * N + gc];
-                    }
+                if (globalColB + 0 < N) {
+                    tmp.x = B[base + 0];
                 }
-
-                tmp.x = vals[0];
-                tmp.y = vals[1];
-                tmp.z = vals[2];
-                tmp.w = vals[3];
+                if (globalColB + 1 < N) {
+                    tmp.y = B[base + 1];
+                }
+                if (globalColB + 2 < N) {
+                    tmp.z = B[base + 2];
+                }
+                if (globalColB + 3 < N) {
+                    tmp.w = B[base + 3];
+                }
             }
 
             reinterpret_cast<float4*>(
@@ -124,6 +131,9 @@ __global__ void gemm_kernel(
 
         __syncthreads();
 
+        // ------------------------------------------------------------
+        // Compute
+        // ------------------------------------------------------------
         #pragma unroll
         for (int dotIdx = 0; dotIdx < BK; dotIdx++) {
             float4 a0 = reinterpret_cast<float4*>(
@@ -172,6 +182,9 @@ __global__ void gemm_kernel(
         __syncthreads();
     }
 
+    // ------------------------------------------------------------
+    // Store C
+    // ------------------------------------------------------------
     #pragma unroll
     for (int i = 0; i < TM; i++) {
         int globalRowC = blockRow + threadRow * TM + i;
@@ -181,7 +194,10 @@ __global__ void gemm_kernel(
             int globalColC = blockCol + threadCol * TN + j;
 
             if (globalRowC < M && globalColC < N) {
-                int cIdx = globalRowC * N + globalColC;
+                size_t cIdx =
+                    static_cast<size_t>(globalRowC) *
+                    static_cast<size_t>(N) +
+                    static_cast<size_t>(globalColC);
 
                 C[cIdx] =
                     alpha * threadResults[i][j] +
@@ -190,7 +206,6 @@ __global__ void gemm_kernel(
         }
     }
 }
-
 
 __global__ void gemm_bias_kernel(
     int M,
@@ -220,6 +235,9 @@ __global__ void gemm_bias_kernel(
     float regB[TN];
 
     for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
+        // ------------------------------------------------------------
+        // Load A tile safely
+        // ------------------------------------------------------------
         const int numAFloat4 = (BM * BK) / 4;
 
         for (int i = threadIdx.x; i < numAFloat4; i += numThreads) {
@@ -232,31 +250,29 @@ __global__ void gemm_bias_kernel(
             int globalColA = bkIdx + colA4 * 4;
 
             float4 tmp;
+            tmp.x = 0.0f;
+            tmp.y = 0.0f;
+            tmp.z = 0.0f;
+            tmp.w = 0.0f;
 
-            bool can_vec_load =
-                (globalRowA < M) &&
-                (globalColA + 3 < K);
+            if (globalRowA < M) {
+                size_t base =
+                    static_cast<size_t>(globalRowA) *
+                    static_cast<size_t>(K) +
+                    static_cast<size_t>(globalColA);
 
-            if (can_vec_load) {
-                tmp = reinterpret_cast<const float4*>(
-                    &A[globalRowA * K + globalColA]
-                )[0];
-            } else {
-                float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int gc = globalColA + t;
-
-                    if (globalRowA < M && gc < K) {
-                        vals[t] = A[globalRowA * K + gc];
-                    }
+                if (globalColA + 0 < K) {
+                    tmp.x = A[base + 0];
                 }
-
-                tmp.x = vals[0];
-                tmp.y = vals[1];
-                tmp.z = vals[2];
-                tmp.w = vals[3];
+                if (globalColA + 1 < K) {
+                    tmp.y = A[base + 1];
+                }
+                if (globalColA + 2 < K) {
+                    tmp.z = A[base + 2];
+                }
+                if (globalColA + 3 < K) {
+                    tmp.w = A[base + 3];
+                }
             }
 
             sA[(colA4 * 4 + 0) * BM + rowA] = tmp.x;
@@ -265,6 +281,9 @@ __global__ void gemm_bias_kernel(
             sA[(colA4 * 4 + 3) * BM + rowA] = tmp.w;
         }
 
+        // ------------------------------------------------------------
+        // Load B tile safely
+        // ------------------------------------------------------------
         const int numBFloat4 = (BK * BN) / 4;
 
         for (int i = threadIdx.x; i < numBFloat4; i += numThreads) {
@@ -277,31 +296,29 @@ __global__ void gemm_bias_kernel(
             int globalColB = blockCol + colB4 * 4;
 
             float4 tmp;
+            tmp.x = 0.0f;
+            tmp.y = 0.0f;
+            tmp.z = 0.0f;
+            tmp.w = 0.0f;
 
-            bool can_vec_load =
-                (globalRowB < K) &&
-                (globalColB + 3 < N);
+            if (globalRowB < K) {
+                size_t base =
+                    static_cast<size_t>(globalRowB) *
+                    static_cast<size_t>(N) +
+                    static_cast<size_t>(globalColB);
 
-            if (can_vec_load) {
-                tmp = reinterpret_cast<const float4*>(
-                    &B[globalRowB * N + globalColB]
-                )[0];
-            } else {
-                float vals[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-
-                #pragma unroll
-                for (int t = 0; t < 4; ++t) {
-                    int gc = globalColB + t;
-
-                    if (globalRowB < K && gc < N) {
-                        vals[t] = B[globalRowB * N + gc];
-                    }
+                if (globalColB + 0 < N) {
+                    tmp.x = B[base + 0];
                 }
-
-                tmp.x = vals[0];
-                tmp.y = vals[1];
-                tmp.z = vals[2];
-                tmp.w = vals[3];
+                if (globalColB + 1 < N) {
+                    tmp.y = B[base + 1];
+                }
+                if (globalColB + 2 < N) {
+                    tmp.z = B[base + 2];
+                }
+                if (globalColB + 3 < N) {
+                    tmp.w = B[base + 3];
+                }
             }
 
             reinterpret_cast<float4*>(
@@ -311,6 +328,9 @@ __global__ void gemm_bias_kernel(
 
         __syncthreads();
 
+        // ------------------------------------------------------------
+        // Compute
+        // ------------------------------------------------------------
         #pragma unroll
         for (int dotIdx = 0; dotIdx < BK; dotIdx++) {
             float4 a0 = reinterpret_cast<float4*>(
@@ -359,6 +379,9 @@ __global__ void gemm_bias_kernel(
         __syncthreads();
     }
 
+    // ------------------------------------------------------------
+    // Store C = A x B + bias
+    // ------------------------------------------------------------
     #pragma unroll
     for (int i = 0; i < TM; i++) {
         int globalRowC = blockRow + threadRow * TM + i;
@@ -368,7 +391,10 @@ __global__ void gemm_bias_kernel(
             int globalColC = blockCol + threadCol * TN + j;
 
             if (globalRowC < M && globalColC < N) {
-                int cIdx = globalRowC * N + globalColC;
+                size_t cIdx =
+                    static_cast<size_t>(globalRowC) *
+                    static_cast<size_t>(N) +
+                    static_cast<size_t>(globalColC);
 
                 float b = bias ? bias[globalColC] : 0.0f;
 
@@ -386,8 +412,13 @@ void launch_gemm(
     const float* A,
     const float* B,
     float beta,
-    float* C
+    float* C,
+    cudaStream_t stream
 ) {
+    if (M <= 0 || N <= 0 || K <= 0) {
+        return;
+    }
+
     constexpr int numThreads = (BM / TM) * (BN / TN);
 
     dim3 grid(
@@ -397,9 +428,17 @@ void launch_gemm(
 
     dim3 block(numThreads);
 
-    gemm_kernel<<<grid, block>>>(M, N, K,alpha,A, B, beta, C);
+    gemm_kernel<<<grid, block, 0, stream>>>(
+        M,
+        N,
+        K,
+        alpha,
+        A,
+        B,
+        beta,
+        C
+    );
 }
-
 
 void launch_gemm_bias(
     int M,
@@ -408,8 +447,13 @@ void launch_gemm_bias(
     const float* A,
     const float* B,
     const float* bias,
-    float* C
+    float* C,
+    cudaStream_t stream
 ) {
+    if (M <= 0 || N <= 0 || K <= 0) {
+        return;
+    }
+
     constexpr int numThreads = (BM / TM) * (BN / TN);
 
     dim3 grid(
@@ -419,7 +463,7 @@ void launch_gemm_bias(
 
     dim3 block(numThreads);
 
-    gemm_bias_kernel<<<grid, block>>>(
+    gemm_bias_kernel<<<grid, block, 0, stream>>>(
         M,
         N,
         K,
@@ -430,4 +474,4 @@ void launch_gemm_bias(
     );
 }
 
-}
+} // namespace mini_llm::kernels

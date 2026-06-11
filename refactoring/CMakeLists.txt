@@ -10,6 +10,8 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_ARCHITECTURES 70)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
+option(BUILD_RUNTIME "Build runtime/server" OFF)
+
 add_compile_definitions(WEIGHTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/weights")
 # kernels 라이브러리 생성
 add_library(mini_llm_kernels
@@ -41,6 +43,8 @@ target_link_libraries(mini_llm_model PUBLIC
 )
 
 # runtime 라이브러리 생성
+if(BUILD_RUNTIME)
+
 add_library(mini_llm_runtime
     src/runtime/scheduler.cpp
     src/runtime/server.cpp
@@ -67,7 +71,7 @@ target_include_directories(mini_llm PRIVATE
 target_link_libraries(mini_llm PRIVATE
     mini_llm_runtime
 )
-
+endif()
 # 테스트 파일 생성
 enable_testing()
 
