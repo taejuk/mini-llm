@@ -19,8 +19,7 @@ void launch_gemm(
     const float* A,
     const float* B,
     float beta,
-    float* C,
-    cudaStream_t stream = nullptr
+    float* C
 );
 
 // C = A x B + bias
@@ -31,8 +30,7 @@ void launch_gemm_bias(
     const float* A,
     const float* B,
     const float* bias,
-    float* C,
-    cudaStream_t stream = nullptr
+    float* C
 );
 
 } // namespace mini_llm::kernels

@@ -1,6 +1,62 @@
 #include "kernels/gemm.cuh"
 
+#include <stdint.h>
+
 namespace mini_llm::kernels {
+
+__device__ __forceinline__ float4 make_zero_float4() {
+    return make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+__device__ __forceinline__ float4 load_float4_or_scalar(
+    const float* __restrict__ ptr,
+    int row,
+    int col,
+    int ld,
+    int rows,
+    int cols
+) {
+    float4 tmp = make_zero_float4();
+
+    if (row >= rows) {
+        return tmp;
+    }
+
+    size_t base =
+        static_cast<size_t>(row) *
+        static_cast<size_t>(ld) +
+        static_cast<size_t>(col);
+
+    const float* addr = ptr + base;
+
+    bool in_bounds_vec =
+        (col + 3 < cols);
+
+    bool aligned_16 =
+        (reinterpret_cast<uintptr_t>(addr) & 0xF) == 0;
+
+    if (in_bounds_vec && aligned_16) {
+        return reinterpret_cast<const float4*>(addr)[0];
+    }
+
+    if (col + 0 < cols) {
+        tmp.x = ptr[base + 0];
+    }
+
+    if (col + 1 < cols) {
+        tmp.y = ptr[base + 1];
+    }
+
+    if (col + 2 < cols) {
+        tmp.z = ptr[base + 2];
+    }
+
+    if (col + 3 < cols) {
+        tmp.w = ptr[base + 3];
+    }
+
+    return tmp;
+}
 
 __global__ void gemm_kernel(
     int M,
@@ -32,11 +88,9 @@ __global__ void gemm_kernel(
 
     for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
         // ------------------------------------------------------------
-        // Load A tile: A[M, K] -> sA[BK, BM]
-        //
-        // 기존 float4 global load는 K가 4의 배수가 아닐 때
-        // row start가 16-byte align되지 않아 misaligned address 가능.
-        // 따라서 global load는 scalar로 안전하게 처리.
+        // Load A tile
+        // A: [M, K]
+        // sA layout: [BK, BM]
         // ------------------------------------------------------------
         const int numAFloat4 = (BM * BK) / 4;
 
@@ -49,31 +103,14 @@ __global__ void gemm_kernel(
             int globalRowA = blockRow + rowA;
             int globalColA = bkIdx + colA4 * 4;
 
-            float4 tmp;
-            tmp.x = 0.0f;
-            tmp.y = 0.0f;
-            tmp.z = 0.0f;
-            tmp.w = 0.0f;
-
-            if (globalRowA < M) {
-                size_t base =
-                    static_cast<size_t>(globalRowA) *
-                    static_cast<size_t>(K) +
-                    static_cast<size_t>(globalColA);
-
-                if (globalColA + 0 < K) {
-                    tmp.x = A[base + 0];
-                }
-                if (globalColA + 1 < K) {
-                    tmp.y = A[base + 1];
-                }
-                if (globalColA + 2 < K) {
-                    tmp.z = A[base + 2];
-                }
-                if (globalColA + 3 < K) {
-                    tmp.w = A[base + 3];
-                }
-            }
+            float4 tmp = load_float4_or_scalar(
+                A,
+                globalRowA,
+                globalColA,
+                K,
+                M,
+                K
+            );
 
             sA[(colA4 * 4 + 0) * BM + rowA] = tmp.x;
             sA[(colA4 * 4 + 1) * BM + rowA] = tmp.y;
@@ -82,10 +119,9 @@ __global__ void gemm_kernel(
         }
 
         // ------------------------------------------------------------
-        // Load B tile: B[K, N] -> sB[BK, BN]
-        //
-        // N이 4의 배수가 아닐 수 있으므로 B도 scalar load.
-        // GPT2 vocab size 50257도 4의 배수가 아니어서 중요함.
+        // Load B tile
+        // B: [K, N]
+        // sB layout: [BK, BN]
         // ------------------------------------------------------------
         const int numBFloat4 = (BK * BN) / 4;
 
@@ -98,31 +134,14 @@ __global__ void gemm_kernel(
             int globalRowB = bkIdx + rowB;
             int globalColB = blockCol + colB4 * 4;
 
-            float4 tmp;
-            tmp.x = 0.0f;
-            tmp.y = 0.0f;
-            tmp.z = 0.0f;
-            tmp.w = 0.0f;
-
-            if (globalRowB < K) {
-                size_t base =
-                    static_cast<size_t>(globalRowB) *
-                    static_cast<size_t>(N) +
-                    static_cast<size_t>(globalColB);
-
-                if (globalColB + 0 < N) {
-                    tmp.x = B[base + 0];
-                }
-                if (globalColB + 1 < N) {
-                    tmp.y = B[base + 1];
-                }
-                if (globalColB + 2 < N) {
-                    tmp.z = B[base + 2];
-                }
-                if (globalColB + 3 < N) {
-                    tmp.w = B[base + 3];
-                }
-            }
+            float4 tmp = load_float4_or_scalar(
+                B,
+                globalRowB,
+                globalColB,
+                N,
+                K,
+                N
+            );
 
             reinterpret_cast<float4*>(
                 &sB[rowB * BN + colB4 * 4]
@@ -184,6 +203,7 @@ __global__ void gemm_kernel(
 
     // ------------------------------------------------------------
     // Store C
+    // C = alpha * A * B + beta * C
     // ------------------------------------------------------------
     #pragma unroll
     for (int i = 0; i < TM; i++) {
@@ -236,7 +256,7 @@ __global__ void gemm_bias_kernel(
 
     for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
         // ------------------------------------------------------------
-        // Load A tile safely
+        // Load A tile
         // ------------------------------------------------------------
         const int numAFloat4 = (BM * BK) / 4;
 
@@ -249,31 +269,14 @@ __global__ void gemm_bias_kernel(
             int globalRowA = blockRow + rowA;
             int globalColA = bkIdx + colA4 * 4;
 
-            float4 tmp;
-            tmp.x = 0.0f;
-            tmp.y = 0.0f;
-            tmp.z = 0.0f;
-            tmp.w = 0.0f;
-
-            if (globalRowA < M) {
-                size_t base =
-                    static_cast<size_t>(globalRowA) *
-                    static_cast<size_t>(K) +
-                    static_cast<size_t>(globalColA);
-
-                if (globalColA + 0 < K) {
-                    tmp.x = A[base + 0];
-                }
-                if (globalColA + 1 < K) {
-                    tmp.y = A[base + 1];
-                }
-                if (globalColA + 2 < K) {
-                    tmp.z = A[base + 2];
-                }
-                if (globalColA + 3 < K) {
-                    tmp.w = A[base + 3];
-                }
-            }
+            float4 tmp = load_float4_or_scalar(
+                A,
+                globalRowA,
+                globalColA,
+                K,
+                M,
+                K
+            );
 
             sA[(colA4 * 4 + 0) * BM + rowA] = tmp.x;
             sA[(colA4 * 4 + 1) * BM + rowA] = tmp.y;
@@ -282,7 +285,7 @@ __global__ void gemm_bias_kernel(
         }
 
         // ------------------------------------------------------------
-        // Load B tile safely
+        // Load B tile
         // ------------------------------------------------------------
         const int numBFloat4 = (BK * BN) / 4;
 
@@ -295,31 +298,14 @@ __global__ void gemm_bias_kernel(
             int globalRowB = bkIdx + rowB;
             int globalColB = blockCol + colB4 * 4;
 
-            float4 tmp;
-            tmp.x = 0.0f;
-            tmp.y = 0.0f;
-            tmp.z = 0.0f;
-            tmp.w = 0.0f;
-
-            if (globalRowB < K) {
-                size_t base =
-                    static_cast<size_t>(globalRowB) *
-                    static_cast<size_t>(N) +
-                    static_cast<size_t>(globalColB);
-
-                if (globalColB + 0 < N) {
-                    tmp.x = B[base + 0];
-                }
-                if (globalColB + 1 < N) {
-                    tmp.y = B[base + 1];
-                }
-                if (globalColB + 2 < N) {
-                    tmp.z = B[base + 2];
-                }
-                if (globalColB + 3 < N) {
-                    tmp.w = B[base + 3];
-                }
-            }
+            float4 tmp = load_float4_or_scalar(
+                B,
+                globalRowB,
+                globalColB,
+                N,
+                K,
+                N
+            );
 
             reinterpret_cast<float4*>(
                 &sB[rowB * BN + colB4 * 4]
@@ -380,7 +366,8 @@ __global__ void gemm_bias_kernel(
     }
 
     // ------------------------------------------------------------
-    // Store C = A x B + bias
+    // Store C
+    // C = A * B + bias
     // ------------------------------------------------------------
     #pragma unroll
     for (int i = 0; i < TM; i++) {
