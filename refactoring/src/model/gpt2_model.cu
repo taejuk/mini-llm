@@ -2,7 +2,7 @@
 
 #include "kernels/embedding.cuh"
 #include "kernels/layernorm.cuh"
-#include "kernels/flashattention.cuh"
+#include "kernels/prefill/flashattention.cuh"
 #include "kernels/prefill/append_kv.cuh"
 #include "kernels/residual.cuh"
 
