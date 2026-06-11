@@ -397,7 +397,7 @@ void launch_gemm(
 
     dim3 block(numThreads);
 
-    gemm_kernel(M, N, K,alpha,A, B, beta, C);
+    gemm_kernel<<<grid, block>>>(M, N, K,alpha,A, B, beta, C);
 }
 
 

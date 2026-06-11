@@ -1,9 +1,14 @@
 #include "model/gpt2_model.cuh"
+
 #include "kernels/embedding.cuh"
 #include "kernels/layernorm.cuh"
 #include "kernels/flashattention.cuh"
 #include "kernels/prefill/append_kv.cuh"
 #include "kernels/residual.cuh"
+
+#include "kernels/linear.cuh"   
+#include "kernels/gelu.cuh"     
+#include "kernels/gemm.cuh"     
 #include "kernels/decode/paged_attention.cuh"
 
 #include "runtime/pagekvcache.h"
@@ -12,11 +17,54 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <cstdio>
 
 namespace mini_llm::model {
 namespace C = mini_llm::constants;
 namespace Kernel = mini_llm::kernels;
 namespace Rt = mini_llm::runtime;
+
+
+static float* load_bin(const char* path, size_t n) {
+    FILE* f = fopen(path, "rb");
+
+    if (!f) {
+        std::cerr << "Cannot open weight file: " << path << std::endl;
+        std::exit(1);
+    }
+
+    float* h = static_cast<float*>(std::malloc(n * sizeof(float)));
+
+    if (!h) {
+        std::cerr << "Host malloc failed for weight file: " << path << std::endl;
+        std::exit(1);
+    }
+
+    size_t read_count = fread(h, sizeof(float), n, f);
+    fclose(f);
+
+    if (read_count != n) {
+        std::cerr << "Weight file size mismatch: " << path
+                  << ", expected=" << n
+                  << ", read=" << read_count << std::endl;
+        std::exit(1);
+    }
+
+    float* d;
+    cudaMalloc(&d, n * sizeof(float));
+
+    cudaMemcpy(
+        d,
+        h,
+        n * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
+
+    std::free(h);
+
+    return d;
+}
+
 
 __global__ void transpose_wte_kernel(
     const float* __restrict__ wte,     // [VOCAB_SIZE, D_MODEL]

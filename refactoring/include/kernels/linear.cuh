@@ -11,8 +11,7 @@ void linear(
     float* y,
     int M,
     int K,
-    int N,
-    cudaStream_t stream = nullptr
+    int N
 );
 
 void qkv_projection(
@@ -20,8 +19,7 @@ void qkv_projection(
     const float* qkv_w,
     const float* qkv_b,
     float* buf_qkv,
-    int num_rows,
-    cudaStream_t stream = nullptr
+    int num_rows
 );
 
 }
