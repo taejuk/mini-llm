@@ -1,67 +1,96 @@
 #pragma once
 
-#include "vllm/kv_cache.cuh"
-#include <cublas_v2.h>
 #include <cuda_runtime.h>
+#include <vector>
+#include <memory>
 
+#include "runtime/pagekvcache.h"
+#include "constants.h"
+#include "runtime/request.h"
+#include "runtime/response.h"
 
-#define D_MODEL   768
-#define N_HEADS   12
-#define D_HEAD    64
-#define N_LAYERS  12
-#define D_FF      3072
-#define VOCAB     50257
-#define MAX_SEQ   1024
+namespace mini_llm::model {
+
+namespace Rt = mini_llm::runtime;
 
 struct GPT2Weights {
-  float* wte;              // [VOCAB, D_MODEL]
-  float* wpe;              // [MAX_SEQ, D_MODEL]
-  float* ln1_w[N_LAYERS];  // [D_MODEL]
-  float* ln1_b[N_LAYERS];
-  float* qkv_w[N_LAYERS];  // [3*D_MODEL, D_MODEL]
-  float* qkv_b[N_LAYERS];  // [3*D_MODEL]
-  float* out_w[N_LAYERS];  // [D_MODEL, D_MODEL]
-  float* out_b[N_LAYERS];  // [D_MODEL]
-  float* ln2_w[N_LAYERS];
-  float* ln2_b[N_LAYERS];
-  float* fc1_w[N_LAYERS];  // [D_FF, D_MODEL]
-  float* fc1_b[N_LAYERS];  // [D_FF]
-  float* fc2_w[N_LAYERS];  // [D_MODEL, D_FF]
-  float* fc2_b[N_LAYERS];  // [D_MODEL]
-  float* ln_f_w;
-  float* ln_f_b;
-};
+    float* wte;
+    float* wte_t;
+    float* wpe;
 
+    float* ln1_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* ln1_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* qkv_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* qkv_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* out_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* out_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* ln2_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* ln2_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* fc1_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* fc1_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* fc2_w[mini_llm::constants::GPT2_N_LAYERS];
+    float* fc2_b[mini_llm::constants::GPT2_N_LAYERS];
+    float* ln_f_w;
+    float* ln_f_b;
+};
 
 class GPT2Model {
 private:
-  GPT2Weights W;
-  cublasHandle_t handle;
+    GPT2Weights W;
 
+    float* buf_x;
+    float* buf_ln;
+    float* buf_qkv;
+    float* buf_attn_out;
+    float* buf_proj;
+    float* buf_ff;
+    float* buf_x_last;
+    float* buf_logits;
 
-  float* buf_x;
-  float* buf_ln;
-  float* buf_qkv;
-  float* buf_S;
-  float* buf_O;
-  float* buf_attn;
-  float* buf_ff;
-  float* buf_logits;
+    int* d_tokens;
+    int* d_pos;
+    int* d_block_table;
+    int* d_token_to_block;
+    int* d_token_to_offset;
 
-  int* d_block_table;
-  int block_size;
-  GPT2Model(const char* weight_dir, int blk_size);
+    int* h_token_to_block;
+    int* h_token_to_offset;
+    int* h_tokens;
+    int* h_pos;
+    float* h_logits;
 
+    float* pool;
+
+    GPT2Model();
+
+    void make_tables(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs,
+        int layer
+    );
+
+    void block_prefill(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs,
+        int seq_len,
+        int layer
+    );
+
+    void gather_last_tokens(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs
+    );
 
 public:
+    static GPT2Model& get();
 
-  static void init(const char* weight_dir, int blk_size);
-  static GPT2Model& get();
+    GPT2Model(const GPT2Model&) = delete;
+    GPT2Model& operator=(const GPT2Model&) = delete;
 
-  GPT2Model(const GPT2Model&) = delete;
-  GPT2Model& operator=(const GPT2Model&) = delete;
+    std::vector<Rt::Response> prefill(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs
+    );
 
-  int prefill(const int* d_token_ids, int prompt_len, PagedKVCache& kv);
-  int decode_step(int token_id, PagedKVCache& kv);
-  float* get_logits() const { return buf_logits; }
+    std::vector<Rt::Response> decode(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs
+    );
 };
+
+} // namespace mini_llm::model

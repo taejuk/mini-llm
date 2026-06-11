@@ -1,394 +1,607 @@
 #include "model/gpt2_model.cuh"
-#include "model/gpt2_common.cuh"   // layernorm, gelu, linear<float>, ...
-#include <cstdio>
+
+#include "kernels/embedding.cuh"
+#include "kernels/layernorm.cuh"
+#include "kernels/prefill/flashattention.cuh"
+#include "kernels/prefill/append_kv.cuh"
+#include "kernels/residual.cuh"
+
+#include "kernels/linear.cuh"   
+#include "kernels/gelu.cuh"     
+#include "kernels/gemm.cuh"     
+#include "kernels/decode/paged_attention.cuh"
+
+#include "runtime/pagekvcache.h"
+#include "runtime/pool.cuh"
+#include "runtime/block_manager.h"
+
+#include <iostream>
 #include <cstdlib>
-#include <cstring>
-#include <cmath>
-#include <vector>
+#include <cstdio>
 
-#define CUDA_CHECK(call) \
-    do { cudaError_t e=(call); if(e!=cudaSuccess){ \
-        fprintf(stderr,"CUDA %s:%d %s\n",__FILE__,__LINE__,cudaGetErrorString(e)); \
-        exit(1);} } while(0)
-#define CUBLAS_CHECK(call) \
-    do { cublasStatus_t e=(call); if(e!=CUBLAS_STATUS_SUCCESS){ \
-        fprintf(stderr,"cuBLAS error %s:%d\n",__FILE__,__LINE__); exit(1);} } while(0)
+namespace mini_llm::model {
+namespace C = mini_llm::constants;
+namespace Kernel = mini_llm::kernels;
+namespace Rt = mini_llm::runtime;
 
-#define DECODE_BLOCK 64
-
-/* ============================================================
- * Paged Decode MHA 커널
- *
- * Pool layout (block p, slot s, head h):
- *   K: pool + p*(2*B*D) + s*D + h*d_head
- *   V: pool + p*(2*B*D) + B*D + s*D + h*d_head
- *   B = block_size, D = d_model
- * ============================================================ */
-__global__ void paged_decode_mha_kernel(
-    const float* __restrict__ Q,           // [d_model]
-    const int*   __restrict__ block_table, // [num_logical_blocks]
-    const float* __restrict__ kv_pool,
-    float*       __restrict__ O,           // [d_model]
-    int num_tokens, int block_size,
-    int d_model, int d_head, float scale)
-{
-    extern __shared__ float S[];
-    __shared__ float rbuf[DECODE_BLOCK];
-    __shared__ float s_max, s_sum;
-
-    int h   = blockIdx.x;
-    int tid = threadIdx.x;
-    int bs  = blockDim.x;
-    const float* Qh = Q + h * d_head;
-    size_t BH = (size_t)block_size * d_model;
-
-    /* (1) Attention scores */
-    for (int j = tid; j < num_tokens; j += bs) {
-        int lb = j / block_size, slot = j % block_size;
-        int phys = block_table[lb];
-        const float* Kj = kv_pool + phys*2*BH + slot*d_model + h*d_head;
-        float acc = 0.f;
-        for (int k = 0; k < d_head; k++) acc += Qh[k] * Kj[k];
-        S[j] = acc * scale;
-    }
-    __syncthreads();
-
-    /* (2) Row max */
-    float lm = -INFINITY;
-    for (int j = tid; j < num_tokens; j += bs) lm = fmaxf(lm, S[j]);
-    rbuf[tid] = lm; __syncthreads();
-    for (int s = bs/2; s > 0; s >>= 1) {
-        if (tid < s) rbuf[tid] = fmaxf(rbuf[tid], rbuf[tid+s]); __syncthreads();
-    }
-    if (tid == 0) s_max = rbuf[0]; __syncthreads();
-
-    /* (3) Exp & sum */
-    float ls = 0.f;
-    for (int j = tid; j < num_tokens; j += bs) {
-        float e = expf(S[j] - s_max); S[j] = e; ls += e;
-    }
-    rbuf[tid] = ls; __syncthreads();
-    for (int s = bs/2; s > 0; s >>= 1) {
-        if (tid < s) rbuf[tid] += rbuf[tid+s]; __syncthreads();
-    }
-    if (tid == 0) s_sum = rbuf[0]; __syncthreads();
-    float inv = 1.f / s_sum;
-
-    /* (4) O[h*d_head + k] = sum_j S[j] * V[j][h][k] */
-    for (int k = tid; k < d_head; k += bs) {
-        float acc = 0.f;
-        for (int j = 0; j < num_tokens; j++) {
-            int lb = j / block_size, slot = j % block_size;
-            int phys = block_table[lb];
-            const float* Vj = kv_pool + phys*2*BH + BH + slot*d_model + h*d_head;
-            acc += S[j] * Vj[k];
-        }
-        O[h * d_head + k] = acc * inv;
-    }
-}
-
-/* ============================================================
- * Prefill MHA
- * ============================================================ */
-static void mha_prefill(cublasHandle_t handle,
-                        const float* x,
-                        const float* qkv_w, const float* qkv_b,
-                        const float* out_w, const float* out_b,
-                        float* attn_out,
-                        float* buf_qkv, float* buf_S, float* buf_O,
-                        PagedKVCache& kv, int seq_len)
-{
-    const float alpha = 1.f, beta = 0.f, scale = 1.f / sqrtf((float)D_HEAD);
-
-    // 1) QKV projection
-    linear<float>(handle, x, qkv_w, qkv_b, buf_qkv, seq_len, D_MODEL, 3*D_MODEL);
-
-    // 2) K, V pack → PagedKVCache에 저장
-    {
-        float *d_k, *d_v;
-        CUDA_CHECK(cudaMalloc(&d_k, (size_t)seq_len * D_MODEL * sizeof(float)));
-        CUDA_CHECK(cudaMalloc(&d_v, (size_t)seq_len * D_MODEL * sizeof(float)));
-
-        // buf_qkv: [seq, 3*D] interleaved → K at offset D_MODEL, V at 2*D_MODEL
-        float* h_qkv = (float*)malloc((size_t)seq_len * 3 * D_MODEL * sizeof(float));
-        float* h_k   = (float*)malloc((size_t)seq_len * D_MODEL * sizeof(float));
-        float* h_v   = (float*)malloc((size_t)seq_len * D_MODEL * sizeof(float));
-        CUDA_CHECK(cudaMemcpy(h_qkv, buf_qkv,
-            (size_t)seq_len * 3 * D_MODEL * sizeof(float),
-            cudaMemcpyDeviceToHost));
-        for (int s = 0; s < seq_len; s++) {
-            memcpy(h_k + s*D_MODEL, h_qkv + s*3*D_MODEL + D_MODEL,   D_MODEL*sizeof(float));
-            memcpy(h_v + s*D_MODEL, h_qkv + s*3*D_MODEL + 2*D_MODEL, D_MODEL*sizeof(float));
-        }
-        CUDA_CHECK(cudaMemcpy(d_k, h_k, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(d_v, h_v, (size_t)seq_len*D_MODEL*sizeof(float), cudaMemcpyHostToDevice));
-        kv.append_token_kv_batch(d_k, d_v, seq_len);
-        cudaFree(d_k); cudaFree(d_v);
-        free(h_qkv); free(h_k); free(h_v);
-    }
-
-    // 3) QK^T — strided batched (interleaved Q, K)
-    CUBLAS_CHECK(cublasSgemmStridedBatched(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        seq_len, seq_len, D_HEAD,
-        &scale,
-        buf_qkv + D_MODEL,  3*D_MODEL, D_HEAD,   // K
-        buf_qkv,            3*D_MODEL, D_HEAD,   // Q
-        &beta,
-        buf_S, seq_len, (long long)seq_len*seq_len,
-        N_HEADS));
-
-    // 4) Causal mask + Softmax
-    causal_mask_apply(buf_S, seq_len, N_HEADS);
-    softmax_prefill(buf_S, seq_len, N_HEADS);
-
-    // 5) O = softmax(S) * V
-    CUBLAS_CHECK(cublasSgemmStridedBatched(handle,
-        CUBLAS_OP_N, CUBLAS_OP_N,
-        D_HEAD, seq_len, seq_len,
-        &alpha,
-        buf_qkv + 2*D_MODEL, 3*D_MODEL, D_HEAD,
-        buf_S,               seq_len,   (long long)seq_len*seq_len,
-        &beta,
-        buf_O, D_MODEL, D_HEAD,
-        N_HEADS));
-
-    // 6) Output projection
-    linear<float>(handle, buf_O, out_w, out_b, attn_out, seq_len, D_MODEL, D_MODEL);
-}
-
-/* ============================================================
- * Decode MHA — Paged Attention
- * ============================================================ */
-static void mha_decode(cublasHandle_t handle,
-                       const float* x_in,
-                       const float* qkv_w, const float* qkv_b,
-                       const float* out_w, const float* out_b,
-                       float* attn_out,
-                       float* buf_qkv, float* buf_O,
-                       PagedKVCache& kv, int* d_block_table)
-{
-    // 1) QKV projection (seq=1)
-    linear<float>(handle, x_in, qkv_w, qkv_b, buf_qkv, 1, D_MODEL, 3*D_MODEL);
-
-    // 2) 현재 토큰의 K, V를 KV cache에 추가
-    kv.append_token_kv(buf_qkv + D_MODEL, buf_qkv + 2*D_MODEL);
-
-    // 3) block_table → GPU 복사
-    const auto& bt = kv.get_block_table();
-    int num_blocks = (int)bt.size();
-    int num_tokens = kv.get_num_tokens();
-    std::vector<int> h_phys(num_blocks);
-    for (int i = 0; i < num_blocks; i++) h_phys[i] = bt[i].phys_block_id;
-    CUDA_CHECK(cudaMemcpy(d_block_table, h_phys.data(),
-                          num_blocks * sizeof(int), cudaMemcpyHostToDevice));
-
-    // 4) Paged decode attention
-    float scale = 1.f / sqrtf((float)D_HEAD);
-    float* pool = BlockAllocator::getInstance().get_pool();
-    int    bsz  = BlockAllocator::getInstance().get_block_size();
-    size_t smem = (size_t)num_tokens * sizeof(float);
-
-    paged_decode_mha_kernel<<<N_HEADS, DECODE_BLOCK, smem>>>(
-        buf_qkv, d_block_table, pool, buf_O,
-        num_tokens, bsz, D_MODEL, D_HEAD, scale);
-
-    // 5) Output projection
-    linear<float>(handle, buf_O, out_w, out_b, attn_out, 1, D_MODEL, D_MODEL);
-}
-
-/* ============================================================
- * Transformer Block
- * ============================================================ */
-static void block_prefill(cublasHandle_t handle, float* x,
-                          const GPT2Weights& W, int layer,
-                          float* buf_ln, float* buf_qkv,
-                          float* buf_S, float* buf_O,
-                          float* buf_attn, float* buf_ff,
-                          PagedKVCache& kv, int seq_len)
-{
-    int nd = seq_len * D_MODEL;
-    layernorm(x, buf_ln, W.ln1_w[layer], W.ln1_b[layer], seq_len, D_MODEL);
-    mha_prefill(handle, buf_ln,
-                W.qkv_w[layer], W.qkv_b[layer],
-                W.out_w[layer], W.out_b[layer],
-                buf_attn, buf_qkv, buf_S, buf_O, kv, seq_len);
-    residual_add(x, buf_attn, nd);
-
-    layernorm(x, buf_ln, W.ln2_w[layer], W.ln2_b[layer], seq_len, D_MODEL);
-    linear<float>(handle, buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, D_MODEL, D_FF);
-    gelu(buf_ff, seq_len * D_FF);
-    linear<float>(handle, buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn, seq_len, D_FF, D_MODEL);
-    residual_add(x, buf_attn, nd);
-}
-
-static void block_decode(cublasHandle_t handle, float* x_row,
-                         const GPT2Weights& W, int layer,
-                         float* buf_ln, float* buf_qkv, float* buf_O,
-                         float* buf_attn, float* buf_ff,
-                         PagedKVCache& kv, int* d_block_table)
-{
-    layernorm(x_row, buf_ln, W.ln1_w[layer], W.ln1_b[layer], 1, D_MODEL);
-    mha_decode(handle, buf_ln,
-               W.qkv_w[layer], W.qkv_b[layer],
-               W.out_w[layer], W.out_b[layer],
-               buf_attn, buf_qkv, buf_O, kv, d_block_table);
-    residual_add(x_row, buf_attn, D_MODEL);
-
-    layernorm(x_row, buf_ln, W.ln2_w[layer], W.ln2_b[layer], 1, D_MODEL);
-    linear<float>(handle, buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, 1, D_MODEL, D_FF);
-    gelu(buf_ff, D_FF);
-    linear<float>(handle, buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_attn, 1, D_FF, D_MODEL);
-    residual_add(x_row, buf_attn, D_MODEL);
-}
-
-/* ============================================================
- * Weight 로더
- * ============================================================ */
-static float* alloc_gpu(size_t n) {
-    float* p; CUDA_CHECK(cudaMalloc(&p, n*sizeof(float))); return p;
-}
 
 static float* load_bin(const char* path, size_t n) {
     FILE* f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "Cannot open %s\n", path); exit(1); }
-    float* h = (float*)malloc(n * sizeof(float));
-    fread(h, sizeof(float), n, f); fclose(f);
-    float* d = alloc_gpu(n);
-    CUDA_CHECK(cudaMemcpy(d, h, n*sizeof(float), cudaMemcpyHostToDevice));
-    free(h); return d;
+
+    if (!f) {
+        std::cerr << "Cannot open weight file: " << path << std::endl;
+        std::exit(1);
+    }
+
+    float* h = static_cast<float*>(std::malloc(n * sizeof(float)));
+
+    if (!h) {
+        std::cerr << "Host malloc failed for weight file: " << path << std::endl;
+        std::exit(1);
+    }
+
+    size_t read_count = fread(h, sizeof(float), n, f);
+    fclose(f);
+
+    if (read_count != n) {
+        std::cerr << "Weight file size mismatch: " << path
+                  << ", expected=" << n
+                  << ", read=" << read_count << std::endl;
+        std::exit(1);
+    }
+
+    float* d;
+    cudaMalloc(&d, n * sizeof(float));
+
+    cudaMemcpy(
+        d,
+        h,
+        n * sizeof(float),
+        cudaMemcpyHostToDevice
+    );
+
+    std::free(h);
+
+    return d;
 }
 
-static GPT2Weights load_weights(const char* dir) {
+
+__global__ void transpose_wte_kernel(
+    const float* __restrict__ wte,     // [VOCAB_SIZE, D_MODEL]
+    float* __restrict__ wte_t,         // [D_MODEL, VOCAB_SIZE]
+    int vocab_size,
+    int d_model
+) {
+    int d = blockIdx.x * blockDim.x + threadIdx.x; // hidden dim
+    int v = blockIdx.y * blockDim.y + threadIdx.y; // vocab index
+
+    if (d < d_model && v < vocab_size) {
+        wte_t[static_cast<size_t>(d) * vocab_size + v] =
+            wte[static_cast<size_t>(v) * d_model + d];
+    }
+}
+
+static float* make_wte_t_from_wte(const float* wte) {
+    float* wte_t = nullptr;
+
+    size_t n =
+        static_cast<size_t>(C::GPT2_VOCAB_SIZE) *
+        static_cast<size_t>(C::GPT2_D_MODEL);
+
+    cudaMalloc(&wte_t, n * sizeof(float));
+
+    dim3 block(16, 16);
+    dim3 grid(
+        (C::GPT2_D_MODEL + block.x - 1) / block.x,
+        (C::GPT2_VOCAB_SIZE + block.y - 1) / block.y
+    );
+
+    transpose_wte_kernel<<<grid, block>>>(
+        wte,
+        wte_t,
+        C::GPT2_VOCAB_SIZE,
+        C::GPT2_D_MODEL
+    );
+
+    cudaGetLastError();
+    cudaDeviceSynchronize();
+
+    return wte_t;
+}
+
+static GPT2Weights load_weights() {
     GPT2Weights W; char path[512];
 #define LOAD(ptr, fname, n) \
-    snprintf(path, 512, "%s/%s", dir, fname); ptr = load_bin(path, (size_t)(n));
-    LOAD(W.wte, "wte.bin", (size_t)VOCAB*D_MODEL);
-    LOAD(W.wpe, "wpe.bin", (size_t)MAX_SEQ*D_MODEL);
-    for (int l = 0; l < N_LAYERS; l++) {
+    snprintf(path, 512, "%s/%s", WEIGHTS_DIR, fname); ptr = load_bin(path, (size_t)(n));
+    LOAD(W.wte, "wte.bin", (size_t)C::GPT2_VOCAB_SIZE*C::GPT2_D_MODEL);
+    LOAD(W.wpe, "wpe.bin", (size_t)C::MAX_SEQ*C::GPT2_D_MODEL);
+    W.wte_t = make_wte_t_from_wte(W.wte);
+    for (int l = 0; l < C::GPT2_N_LAYERS; l++) {
         char nm[64];
-        snprintf(nm,64,"ln1_w_%d.bin",l); LOAD(W.ln1_w[l], nm, D_MODEL);
-        snprintf(nm,64,"ln1_b_%d.bin",l); LOAD(W.ln1_b[l], nm, D_MODEL);
-        snprintf(nm,64,"qkv_w_%d.bin",l); LOAD(W.qkv_w[l], nm, (size_t)3*D_MODEL*D_MODEL);
-        snprintf(nm,64,"qkv_b_%d.bin",l); LOAD(W.qkv_b[l], nm, 3*D_MODEL);
-        snprintf(nm,64,"out_w_%d.bin",l); LOAD(W.out_w[l], nm, (size_t)D_MODEL*D_MODEL);
-        snprintf(nm,64,"out_b_%d.bin",l); LOAD(W.out_b[l], nm, D_MODEL);
-        snprintf(nm,64,"ln2_w_%d.bin",l); LOAD(W.ln2_w[l], nm, D_MODEL);
-        snprintf(nm,64,"ln2_b_%d.bin",l); LOAD(W.ln2_b[l], nm, D_MODEL);
-        snprintf(nm,64,"fc1_w_%d.bin",l); LOAD(W.fc1_w[l], nm, (size_t)D_FF*D_MODEL);
-        snprintf(nm,64,"fc1_b_%d.bin",l); LOAD(W.fc1_b[l], nm, D_FF);
-        snprintf(nm,64,"fc2_w_%d.bin",l); LOAD(W.fc2_w[l], nm, (size_t)D_MODEL*D_FF);
-        snprintf(nm,64,"fc2_b_%d.bin",l); LOAD(W.fc2_b[l], nm, D_MODEL);
+        snprintf(nm,64,"ln1_w_%d.bin",l); LOAD(W.ln1_w[l], nm, C::GPT2_D_MODEL);
+        snprintf(nm,64,"ln1_b_%d.bin",l); LOAD(W.ln1_b[l], nm, C::GPT2_D_MODEL);
+        snprintf(nm,64,"qkv_w_%d.bin",l); LOAD(W.qkv_w[l], nm, (size_t)3*C::GPT2_D_MODEL*C::GPT2_D_MODEL);
+        snprintf(nm,64,"qkv_b_%d.bin",l); LOAD(W.qkv_b[l], nm, 3*C::GPT2_D_MODEL);
+        snprintf(nm,64,"out_w_%d.bin",l); LOAD(W.out_w[l], nm, (size_t)C::GPT2_D_MODEL*C::GPT2_D_MODEL);
+        snprintf(nm,64,"out_b_%d.bin",l); LOAD(W.out_b[l], nm, C::GPT2_D_MODEL);
+        snprintf(nm,64,"ln2_w_%d.bin",l); LOAD(W.ln2_w[l], nm, C::GPT2_D_MODEL);
+        snprintf(nm,64,"ln2_b_%d.bin",l); LOAD(W.ln2_b[l], nm, C::GPT2_D_MODEL);
+        snprintf(nm,64,"fc1_w_%d.bin",l); LOAD(W.fc1_w[l], nm, (size_t)C::GPT2_D_FF*C::GPT2_D_MODEL);
+        snprintf(nm,64,"fc1_b_%d.bin",l); LOAD(W.fc1_b[l], nm, C::GPT2_D_FF);
+        snprintf(nm,64,"fc2_w_%d.bin",l); LOAD(W.fc2_w[l], nm, (size_t)C::GPT2_D_MODEL*C::GPT2_D_FF);
+        snprintf(nm,64,"fc2_b_%d.bin",l); LOAD(W.fc2_b[l], nm, C::GPT2_D_MODEL);
     }
-    LOAD(W.ln_f_w, "ln_f_w.bin", D_MODEL);
-    LOAD(W.ln_f_b, "ln_f_b.bin", D_MODEL);
+    LOAD(W.ln_f_w, "ln_f_w.bin", C::GPT2_D_MODEL);
+    LOAD(W.ln_f_b, "ln_f_b.bin", C::GPT2_D_MODEL);
 #undef LOAD
     return W;
 }
 
-static int argmax_cpu(const float* v, int n) {
-    int best = 0;
-    for (int i = 1; i < n; i++) if (v[i] > v[best]) best = i;
-    return best;
-}
+GPT2Model::GPT2Model() {
+    W = load_weights();
+    // buf_qkv랑 MAX_BATCH수를 조절하면서 할 것
+    cudaMalloc(&buf_x, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_ln, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_qkv, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * 3 * sizeof(float));
+    cudaMalloc(&buf_attn_out, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_proj, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_ff, C::MAX_BATCH_NUM * C::MAX_SEQ * C::GPT2_D_FF * sizeof(float));
+    cudaMalloc(&buf_x_last, C::MAX_BATCH_NUM * C::GPT2_D_MODEL * sizeof(float));
+    cudaMalloc(&buf_logits, C::MAX_BATCH_NUM * C::GPT2_VOCAB_SIZE * sizeof(float));
+    cudaMalloc(&d_tokens, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
+    cudaMalloc(&d_pos, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
+    cudaMalloc(&d_token_to_block, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
+    cudaMalloc(&d_token_to_offset, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
+    h_token_to_block = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
+    h_token_to_offset = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
+    h_tokens = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
+    h_pos = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
+    h_logits = new float[C::GPT2_VOCAB_SIZE * C::MAX_BATCH_NUM];
+    int max_blocks = (C::MAX_BATCH_NUM * C::MAX_SEQ) / C::DEFAULT_KV_BLOCK_SIZE + 1;
 
-/* ============================================================
- * GPT2Model 구현
- * ============================================================ */
-static GPT2Model* g_instance = nullptr;
-
-GPT2Model::GPT2Model(const char* weight_dir, int blk_size)
-    : block_size(blk_size)
-{
-    CUBLAS_CHECK(cublasCreate(&handle));
-
-    printf("Loading GPT-2 weights (FP32)... "); fflush(stdout);
-    W = load_weights(weight_dir);
-    printf("done\n");
-
-    buf_x      = alloc_gpu((size_t)MAX_SEQ * D_MODEL);
-    buf_ln     = alloc_gpu((size_t)MAX_SEQ * D_MODEL);
-    buf_qkv    = alloc_gpu((size_t)MAX_SEQ * 3 * D_MODEL);
-    buf_S      = alloc_gpu((size_t)N_HEADS * MAX_SEQ * MAX_SEQ);
-    buf_O      = alloc_gpu((size_t)MAX_SEQ * D_MODEL);
-    buf_attn   = alloc_gpu((size_t)MAX_SEQ * D_MODEL);
-    buf_ff     = alloc_gpu((size_t)MAX_SEQ * D_FF);
-    buf_logits = alloc_gpu((size_t)VOCAB);
-
-    int max_blocks = MAX_SEQ / blk_size + 1;
-    CUDA_CHECK(cudaMalloc(&d_block_table, max_blocks * sizeof(int)));
-}
-
-void GPT2Model::init(const char* weight_dir, int blk_size) {
-    if (!g_instance)
-        g_instance = new GPT2Model(weight_dir, blk_size);
+    cudaMalloc(&d_block_table, max_blocks * sizeof(int));
+    pool = mini_llm::runtime::Pool::getInstance().pool_start();
 }
 
 GPT2Model& GPT2Model::get() {
-    if (!g_instance) {
-        fprintf(stderr, "GPT2Model::get() called before init()\n");
-        exit(1);
+    static GPT2Model gpt2_model;
+    return gpt2_model;
+}
+
+void GPT2Model::make_tables(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs,
+    int layer
+) {
+    size_t cur = 0;
+
+    for (const auto& req : reqs) {
+        int tokens_size = req->prompts_len;
+        Rt::PagedKVCache& kv = req->layer_kv[layer];
+
+        for (int i = 0; i < tokens_size; i++) {
+            int physical_block =
+                kv.physical_block_id(i / C::DEFAULT_KV_BLOCK_SIZE);
+            int offset = i % C::DEFAULT_KV_BLOCK_SIZE;
+
+            h_token_to_block[cur] = physical_block;
+            h_token_to_offset[cur] = offset;
+            cur++;
+        }
     }
-    return *g_instance;
+
+    cudaMemcpy(
+        d_token_to_block,
+        h_token_to_block,
+        cur * sizeof(int),
+        cudaMemcpyHostToDevice
+    );
+
+    cudaMemcpy(
+        d_token_to_offset,
+        h_token_to_offset,
+        cur * sizeof(int),
+        cudaMemcpyHostToDevice
+    );
 }
 
-int GPT2Model::prefill(const int* d_token_ids, int prompt_len, PagedKVCache& kv) {
-    // Embedding
-    embedding_lookup(d_token_ids, W.wte, W.wpe, buf_x, prompt_len, D_MODEL, 0);
+void GPT2Model::gather_last_tokens(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs
+) {
+    int offset = 0;
+    int idx = 0;
 
-    // Transformer layers
-    for (int l = 0; l < N_LAYERS; l++)
-        block_prefill(handle, buf_x, W, l,
-                      buf_ln, buf_qkv, buf_S, buf_O, buf_attn, buf_ff,
-                      kv, prompt_len);
+    for (const auto& req : reqs) {
+        int last_prompt_idx = req->prompts_len - 1;
 
-    // Final LN + LM head (마지막 토큰 위치)
-    float* last_x = buf_x + (size_t)(prompt_len - 1) * D_MODEL;
-    layernorm(last_x, buf_ln, W.ln_f_w, W.ln_f_b, 1, D_MODEL);
-    const float alpha = 1.f, beta = 0.f;
-    CUBLAS_CHECK(cublasSgemm(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        VOCAB, 1, D_MODEL,
-        &alpha, W.wte, D_MODEL, buf_ln, D_MODEL,
-        &beta,  buf_logits, VOCAB));
+        cudaMemcpy(
+            buf_x_last + idx * C::GPT2_D_MODEL,
+            buf_x + (offset + last_prompt_idx) * C::GPT2_D_MODEL,
+            C::GPT2_D_MODEL * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
 
-    CUDA_CHECK(cudaDeviceSynchronize());
-    float* h_logits = (float*)malloc(VOCAB * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(h_logits, buf_logits, VOCAB*sizeof(float), cudaMemcpyDeviceToHost));
-    int next = argmax_cpu(h_logits, VOCAB);
-    free(h_logits);
-    return next;
+        idx++;
+        offset += req->prompts_len;
+    }
 }
 
-int GPT2Model::decode_step(int token_id, PagedKVCache& kv) {
-    int pos = kv.get_num_tokens();
-    float* x_row = buf_x + (size_t)pos * D_MODEL;
+void GPT2Model::block_prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs, int seq_len, int layer) {
+        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
+        // buf_qkv를 만들어야 한다.
+        Kernel::qkv_projection(
+            buf_ln,
+            W.qkv_w[layer],
+            W.qkv_b[layer],
+            buf_qkv,
+            seq_len
+        );
+        // buf_qkv를 저장하는 것은 모든 request가 같이하는게 낫다.
+        make_tables(reqs, layer);
+        Kernel::append_prefill_kv(buf_qkv, pool, d_token_to_block, d_token_to_offset, seq_len);
+        // attention 호출
+        int before_tokens = 0;   
+        float scale = 1.0f / sqrtf(static_cast<float>(mini_llm::constants::GPT2_D_HEAD));
+        for(const auto& req: reqs) {
+            int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
+            int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
+            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts_len, scale);
+            before_tokens += req->prompts_len;
+        }
+        // output projection을 한다.
+        Kernel::linear(
+            buf_attn_out,
+            W.out_w[layer],
+            W.out_b[layer],
+            buf_proj,
+            seq_len,
+            mini_llm::constants::GPT2_D_MODEL,
+            mini_llm::constants::GPT2_D_MODEL
+        );
 
-    // Embedding (position = pos)
-    int* d_tok; CUDA_CHECK(cudaMalloc(&d_tok, sizeof(int)));
-    CUDA_CHECK(cudaMemcpy(d_tok, &token_id, sizeof(int), cudaMemcpyHostToDevice));
-    embedding_lookup(d_tok, W.wte, W.wpe, x_row, 1, D_MODEL, pos);
-    cudaFree(d_tok);
+        Kernel::residual_add(buf_x, buf_proj, (size_t)seq_len * mini_llm::constants::GPT2_D_MODEL);
+        Kernel::layernorm(buf_x, W.ln2_w[layer], W.ln2_b[layer], buf_ln ,seq_len, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::linear(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, mini_llm::constants::GPT2_D_MODEL, mini_llm::constants::GPT2_D_FF);
+        Kernel::gelu(buf_ff, seq_len * mini_llm::constants::GPT2_D_FF);
+        Kernel::linear(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_proj, seq_len, mini_llm::constants::GPT2_D_FF, mini_llm::constants::GPT2_D_MODEL);
+        Kernel::residual_add(buf_x, buf_proj, seq_len * mini_llm::constants::GPT2_D_MODEL);
+}
 
-    // Transformer layers
-    for (int l = 0; l < N_LAYERS; l++)
-        block_decode(handle, x_row, W, l,
-                     buf_ln, buf_qkv, buf_O, buf_attn, buf_ff,
-                     kv, d_block_table);
+static std::vector<int> argmax_cpu(const float* v, int row, int col) {
+    std::vector<int> result;
+    for(int r = 0; r < row; r++) {
+        int best = 0;
+        for(int i = 1; i < col; i++)
+            if(v[r * col + best] < v[r * col + i]) best = i;
+        result.push_back(best);
+    }
+    return result;
+}
 
-    // Final LN + LM head
-    layernorm(x_row, buf_ln, W.ln_f_w, W.ln_f_b, 1, D_MODEL);
-    const float alpha = 1.f, beta = 0.f;
-    CUBLAS_CHECK(cublasSgemm(handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        VOCAB, 1, D_MODEL,
-        &alpha, W.wte, D_MODEL, buf_ln, D_MODEL,
-        &beta,  buf_logits, VOCAB));
+std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs) {
+    size_t seq_len = 0;
 
-    CUDA_CHECK(cudaDeviceSynchronize());
-    float* h_logits = (float*)malloc(VOCAB * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(h_logits, buf_logits, VOCAB*sizeof(float), cudaMemcpyDeviceToHost));
-    int next = argmax_cpu(h_logits, VOCAB);
-    free(h_logits);
-    return next;
+    for (const auto& req : reqs) {
+        seq_len += req->prompts_len;
+    }
+
+    int pos = 0;
+
+    for (const auto& req : reqs) {
+        for (int i = 0; i < req->prompts_len; i++) {
+            h_tokens[pos] = req->tokens[i];
+            h_pos[pos] = i;
+            pos++;
+        }
+    }
+
+    int size = static_cast<int>(seq_len * sizeof(int));
+
+    cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
+    // 1. embedding 호출
+    Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
+    
+    // block prefill을 여기서 해야한다.
+    for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
+        // layer마다 block을 직접 할당한다.
+        block_prefill(reqs, seq_len, layer);
+    }
+    // last block을 가져와서 합쳐야 한다.
+    gather_last_tokens(reqs);
+    Kernel::layernorm(buf_x_last, W.ln_f_w, W.ln_f_b, buf_ln,reqs.size(), mini_llm::constants::GPT2_D_MODEL);
+    Kernel::launch_gemm(
+        reqs.size(),              // M = batch
+        C::GPT2_VOCAB_SIZE,       // N = vocab
+        C::GPT2_D_MODEL,          // K = hidden
+        1.0f,
+        buf_ln,                   // [B, D]
+        W.wte_t,                  // [D, V]
+        0.0f,
+        buf_logits                // [B, V]
+    );
+    cudaMemcpy(h_logits, buf_logits, mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
+    std::vector<Rt::Response> result;
+    for (int i = 0; i < reqs.size(); i++) {
+        bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+        result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
+    }
+    return result;
+}
+
+std::vector<Rt::Response> GPT2Model::decode(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs
+) {
+    int batch_size = static_cast<int>(reqs.size());
+
+    if (batch_size == 0) {
+        return {};
+    }
+
+    for (int i = 0; i < batch_size; i++) {
+        h_tokens[i] = reqs[i]->tokens.back();
+
+        h_pos[i] = static_cast<int>(reqs[i]->tokens.size()) - 1;
+    }
+
+    int token_bytes = batch_size * sizeof(int);
+
+    cudaMemcpy(
+        d_tokens,
+        h_tokens,
+        token_bytes,
+        cudaMemcpyHostToDevice
+    );
+
+    cudaMemcpy(
+        d_pos,
+        h_pos,
+        token_bytes,
+        cudaMemcpyHostToDevice
+    );
+
+    Kernel::embedding_lookup(
+        d_tokens,
+        d_pos,
+        W.wte,
+        W.wpe,
+        buf_x,
+        batch_size
+    );
+
+    int* d_block_offsets = nullptr;
+    int* d_num_tokens = nullptr;
+
+    cudaMalloc(
+        &d_block_offsets,
+        batch_size * sizeof(int)
+    );
+
+    cudaMalloc(
+        &d_num_tokens,
+        batch_size * sizeof(int)
+    );
+
+    for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
+        Kernel::layernorm(
+            buf_x,
+            W.ln1_w[layer],
+            W.ln1_b[layer],
+            buf_ln,
+            batch_size,
+            C::GPT2_D_MODEL
+        );
+
+        Kernel::qkv_projection(
+            buf_ln,
+            W.qkv_w[layer],
+            W.qkv_b[layer],
+            buf_qkv,
+            batch_size
+        );
+
+        for (int i = 0; i < batch_size; i++) {
+            Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
+
+            int cached_tokens = kv.num_tokens_;
+            int logical_block = cached_tokens / C::DEFAULT_KV_BLOCK_SIZE;
+            int offset_in_block = cached_tokens % C::DEFAULT_KV_BLOCK_SIZE;
+
+            int physical_block = kv.physical_block_id(logical_block);
+
+            h_token_to_block[i] = physical_block;
+            h_token_to_offset[i] = offset_in_block;
+        }
+
+        cudaMemcpy(
+            d_token_to_block,
+            h_token_to_block,
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_token_to_offset,
+            h_token_to_offset,
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        Kernel::append_prefill_kv(
+            buf_qkv,
+            pool,
+            d_token_to_block,
+            d_token_to_offset,
+            batch_size
+        );
+
+
+        std::vector<int> h_flat_block_table;
+        std::vector<int> h_block_offsets(batch_size);
+        std::vector<int> h_num_tokens(batch_size);
+
+        h_flat_block_table.reserve(
+            static_cast<size_t>(batch_size) *
+            ((C::MAX_SEQ + C::DEFAULT_KV_BLOCK_SIZE - 1) /
+             C::DEFAULT_KV_BLOCK_SIZE)
+        );
+
+        for (int i = 0; i < batch_size; i++) {
+            Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
+
+            h_block_offsets[i] =
+                static_cast<int>(h_flat_block_table.size());
+
+            for (int block_id : kv.block_table_) {
+                h_flat_block_table.push_back(block_id);
+            }
+
+            h_num_tokens[i] = kv.num_tokens_ + 1;
+        }
+
+        cudaMemcpy(
+            d_block_table,
+            h_flat_block_table.data(),
+            h_flat_block_table.size() * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_block_offsets,
+            h_block_offsets.data(),
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_num_tokens,
+            h_num_tokens.data(),
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        Kernel::paged_decode_attention(
+            buf_qkv,
+            d_block_table,
+            d_block_offsets,
+            d_num_tokens,
+            pool,
+            buf_attn_out,
+            batch_size,
+            C::MAX_SEQ
+        );
+
+
+        Kernel::linear(
+            buf_attn_out,
+            W.out_w[layer],
+            W.out_b[layer],
+            buf_proj,
+            batch_size,
+            C::GPT2_D_MODEL,
+            C::GPT2_D_MODEL
+        );
+
+        Kernel::residual_add(
+            buf_x,
+            buf_proj,
+            batch_size * C::GPT2_D_MODEL
+        );
+
+        Kernel::layernorm(
+            buf_x,
+            W.ln2_w[layer],
+            W.ln2_b[layer],
+            buf_ln,
+            batch_size,
+            C::GPT2_D_MODEL
+        );
+
+        Kernel::linear(
+            buf_ln,
+            W.fc1_w[layer],
+            W.fc1_b[layer],
+            buf_ff,
+            batch_size,
+            C::GPT2_D_MODEL,
+            C::GPT2_D_FF
+        );
+
+        Kernel::gelu(
+            buf_ff,
+            batch_size * C::GPT2_D_FF
+        );
+
+        Kernel::linear(
+            buf_ff,
+            W.fc2_w[layer],
+            W.fc2_b[layer],
+            buf_proj,
+            batch_size,
+            C::GPT2_D_FF,
+            C::GPT2_D_MODEL
+        );
+
+        Kernel::residual_add(
+            buf_x,
+            buf_proj,
+            batch_size * C::GPT2_D_MODEL
+        );
+    }
+
+    cudaFree(d_block_offsets);
+    cudaFree(d_num_tokens);
+
+    Kernel::layernorm(
+        buf_x,
+        W.ln_f_w,
+        W.ln_f_b,
+        buf_ln,
+        batch_size,
+        C::GPT2_D_MODEL
+    );
+
+    Kernel::launch_gemm(
+        batch_size,              // M = batch
+        C::GPT2_VOCAB_SIZE,      // N = vocab
+        C::GPT2_D_MODEL,         // K = hidden
+        1.0f,
+        buf_ln,                  // [B, D]
+        W.wte_t,                 // [D, V]
+        0.0f,
+        buf_logits               // [B, V]
+    );
+
+    cudaMemcpy(
+        h_logits,
+        buf_logits,
+        static_cast<size_t>(batch_size) *
+            C::GPT2_VOCAB_SIZE *
+            sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
+    std::vector<int> output_tokens =
+        argmax_cpu(
+            h_logits,
+            batch_size,
+            C::GPT2_VOCAB_SIZE
+        );
+
+    std::vector<Rt::Response> result;
+    result.reserve(batch_size);
+
+    for (int i = 0; i < batch_size; i++) {
+        bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+
+        result.emplace_back(
+            reqs[i]->request_id,
+            output_tokens[i],
+            done
+        );
+    }
+
+    return result;
+}
+
 }
