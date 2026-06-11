@@ -10,16 +10,64 @@
 #include "runtime/pool.cuh"
 #include "runtime/block_manager.h"
 
+#include <iostream>
+#include <cstdlib>
+
 namespace mini_llm::model {
 namespace C = mini_llm::constants;
 namespace Kernel = mini_llm::kernels;
 namespace Rt = mini_llm::runtime;
+
+__global__ void transpose_wte_kernel(
+    const float* __restrict__ wte,     // [VOCAB_SIZE, D_MODEL]
+    float* __restrict__ wte_t,         // [D_MODEL, VOCAB_SIZE]
+    int vocab_size,
+    int d_model
+) {
+    int d = blockIdx.x * blockDim.x + threadIdx.x; // hidden dim
+    int v = blockIdx.y * blockDim.y + threadIdx.y; // vocab index
+
+    if (d < d_model && v < vocab_size) {
+        wte_t[static_cast<size_t>(d) * vocab_size + v] =
+            wte[static_cast<size_t>(v) * d_model + d];
+    }
+}
+
+static float* make_wte_t_from_wte(const float* wte) {
+    float* wte_t = nullptr;
+
+    size_t n =
+        static_cast<size_t>(C::GPT2_VOCAB_SIZE) *
+        static_cast<size_t>(C::GPT2_D_MODEL);
+
+    CUDA_CHECK(cudaMalloc(&wte_t, n * sizeof(float)));
+
+    dim3 block(16, 16);
+    dim3 grid(
+        (C::GPT2_D_MODEL + block.x - 1) / block.x,
+        (C::GPT2_VOCAB_SIZE + block.y - 1) / block.y
+    );
+
+    transpose_wte_kernel<<<grid, block>>>(
+        wte,
+        wte_t,
+        C::GPT2_VOCAB_SIZE,
+        C::GPT2_D_MODEL
+    );
+
+    cudaGetLastError();
+    cudaDeviceSynchronize();
+
+    return wte_t;
+}
+
 static GPT2Weights load_weights() {
     GPT2Weights W; char path[512];
 #define LOAD(ptr, fname, n) \
     snprintf(path, 512, "%s/%s", WEIGHTS_DIR, fname); ptr = load_bin(path, (size_t)(n));
     LOAD(W.wte, "wte.bin", (size_t)C::GPT2_VOCAB_SIZE*C::GPT2_D_MODEL);
     LOAD(W.wpe, "wpe.bin", (size_t)C::MAX_SEQ*C::GPT2_D_MODEL);
+    W.wte_t = make_wte_t_from_wte(W.wte);
     for (int l = 0; l < C::GPT2_N_LAYERS; l++) {
         char nm[64];
         snprintf(nm,64,"ln1_w_%d.bin",l); LOAD(W.ln1_w[l], nm, C::GPT2_D_MODEL);
@@ -65,38 +113,67 @@ GPT2Model::GPT2Model() {
 
     cudaMalloc(&d_block_table, max_blocks * sizeof(int));
     pool = mini_llm::runtime::Pool::getInstance().pool_start();
-    block_manager = mini_llm::runtime::BlockManager::getInstance(mini_llm::runtime::Pool::getInstance());
 }
 
 GPT2Model& GPT2Model::get() {
     static GPT2Model gpt2_model;
     return gpt2_model;
 }
-// buf_qkv를 채우기위한 table을 만든다.
-void GPT2Model::make_tables(std::vector<unique_ptr<Rt::Request>>& reqs, int layer) {
+
+void GPT2Model::make_tables(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs,
+    int layer
+) {
     size_t cur = 0;
-    for(const auto& req: reqs) {
-        int tokens_size = req->prompts.size();
-        PagedKVCache& kv = req->layer_kv[layer];
-        for(int i = 0; i < tokens_size; i++) {
-            int physical_block = kv.physical_block_id(i / C::DEFAULT_KV_BLOCK_SIZE);
+
+    for (const auto& req : reqs) {
+        int tokens_size = req->prompts_len;
+        Rt::PagedKVCache& kv = req->layer_kv[layer];
+
+        for (int i = 0; i < tokens_size; i++) {
+            int physical_block =
+                kv.physical_block_id(i / C::DEFAULT_KV_BLOCK_SIZE);
             int offset = i % C::DEFAULT_KV_BLOCK_SIZE;
+
             h_token_to_block[cur] = physical_block;
             h_token_to_offset[cur] = offset;
             cur++;
         }
     }
-    cudaMemcpy(d_token_to_block, h_token_to_block, cur * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_token_to_offset, h_token_to_offset, cur * sizeof(int), cudaMemcpyHostToDevice);
+
+    cudaMemcpy(
+        d_token_to_block,
+        h_token_to_block,
+        cur * sizeof(int),
+        cudaMemcpyHostToDevice
+    );
+
+    cudaMemcpy(
+        d_token_to_offset,
+        h_token_to_offset,
+        cur * sizeof(int),
+        cudaMemcpyHostToDevice
+    );
 }
 
-void GPT2Model::gather_last_tokens(std::vector<unique_ptr<Rt::Request>>& reqs) {
+void GPT2Model::gather_last_tokens(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs
+) {
     int offset = 0;
     int idx = 0;
-    for(const auto& req: reqs) {
-        cudaMemcpy(buf_x_last + idx * C::GPT2_D_MODEL, buf_x + (offset + req->prompts.size()-1)*C::GPT2_D_MODEL, C::GPT2_D_MODEL*sizeof(float), cudaMemcpyDeviceToDevice);
+
+    for (const auto& req : reqs) {
+        int last_prompt_idx = req->prompts_len - 1;
+
+        cudaMemcpy(
+            buf_x_last + idx * C::GPT2_D_MODEL,
+            buf_x + (offset + last_prompt_idx) * C::GPT2_D_MODEL,
+            C::GPT2_D_MODEL * sizeof(float),
+            cudaMemcpyDeviceToDevice
+        );
+
         idx++;
-        offset += req->prompts.size();
+        offset += req->prompts_len;
     }
 }
 
@@ -119,8 +196,8 @@ void GPT2Model::block_prefill(std::vector<unique_ptr<Rt::Request>>& reqs, int se
         for(const auto& req: reqs) {
             int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
             int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
-            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts.size(), scale);
-            before_tokens += req->prompts.size();
+            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts_len, scale);
+            before_tokens += req->prompts_len;
         }
         // output projection을 한다.
         Kernel::linear(
@@ -154,26 +231,31 @@ static std::vector<int> argmax_cpu(const float* v, int row, int col) {
 
 std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs) {
     size_t seq_len = 0;
-    for(const auto& req: reqs) seq_len += req->prompts.size();
+
+    for (const auto& req : reqs) {
+        seq_len += req->prompts_len;
+    }
+
     int pos = 0;
-    for(const auto& req: reqs) {
-        for(int i = 0; i < req->prompts.size(); i++) {
-            h_tokens[pos] = req->prompts[i];
+
+    for (const auto& req : reqs) {
+        for (int i = 0; i < req->prompts_len; i++) {
+            h_tokens[pos] = req->tokens[i];
             h_pos[pos] = i;
             pos++;
         }
     }
-    int size = seq_len*sizeof(int);
+
+    int size = static_cast<int>(seq_len * sizeof(int));
+
     cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
     cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
-    
     // 1. embedding 호출
     Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
     
     // block prefill을 여기서 해야한다.
     for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
         // layer마다 block을 직접 할당한다.
-
         block_prefill(reqs, seq_len, layer);
     }
     // last block을 가져와서 합쳐야 한다.
@@ -192,8 +274,8 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Req
     cudaMemcpy(h_logits, buf_logits, mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float), cudaMemcpyDeviceToHost);
     std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
     std::vector<Rt::Response> result;
-    for(int i = 0; i < reqs.size(); i++) {
-        bool done = reqs[i]->isfinish() || output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+    for (int i = 0; i < reqs.size(); i++) {
+        bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
         result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
     }
     return result;

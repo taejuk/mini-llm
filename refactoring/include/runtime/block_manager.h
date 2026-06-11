@@ -17,11 +17,13 @@ private:
 
     std::vector<PhysicalBlock> blocks_;
     std::vector<int> free_block_ids_;
+    std::vector<bool> is_free_;
 
     explicit BlockManager(Pool& pool)
         : pool_(pool),
           total_blocks_(pool.total_blocks()),
-          free_blocks_(pool.total_blocks()) {
+          free_blocks_(pool.total_blocks()),
+          is_free_(pool.total_blocks(), true) {
         blocks_.reserve(total_blocks_);
         free_block_ids_.reserve(total_blocks_);
 
@@ -32,14 +34,16 @@ private:
     }
 
 public:
-    
     static BlockManager& getInstance(Pool& pool) {
         static BlockManager instance(pool);
         return instance;
     }
 
+    BlockManager(const BlockManager&) = delete;
+    BlockManager& operator=(const BlockManager&) = delete;
+
     bool can_allocate(int n) const {
-        return free_blocks_ >= n;
+        return n >= 0 && free_blocks_ >= n;
     }
 
     int free_blocks_num() const {
@@ -57,6 +61,11 @@ public:
 
         int block_id = free_block_ids_.back();
         free_block_ids_.pop_back();
+
+        assert(block_id >= 0 && block_id < total_blocks_);
+        assert(is_free_[block_id]);
+
+        is_free_[block_id] = false;
         free_blocks_--;
 
         blocks_[block_id].reset();
@@ -84,11 +93,19 @@ public:
 
     void free_one(int block_id) {
         if (block_id < 0 || block_id >= total_blocks_) {
-            std::cerr << "BlockManager: invalid block id " << block_id << "\n";
+            std::cerr << "BlockManager: invalid block id "
+                      << block_id << "\n";
+            return;
+        }
+
+        if (is_free_[block_id]) {
+            std::cerr << "BlockManager: double free block id "
+                      << block_id << "\n";
             return;
         }
 
         blocks_[block_id].reset();
+        is_free_[block_id] = true;
         free_block_ids_.push_back(block_id);
         free_blocks_++;
     }
@@ -111,6 +128,7 @@ public:
 
     float* block_ptr(int block_id) {
         assert(block_id >= 0 && block_id < total_blocks_);
+        assert(!is_free_[block_id]);
         return pool_.block_ptr(block_id);
     }
 

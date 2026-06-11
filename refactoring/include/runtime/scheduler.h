@@ -30,17 +30,18 @@ private:
     std::deque<std::unique_ptr<Request>> cancel_queue_;
     std::atomic<bool> running_{false};
     std::thread worker_;
-    BlockManager block_manager_;
-    GPT2Model model_;
+    mini_llm::runtime::Pool& pool_;
+    mini_llm::runtime::BlockManager& block_manager_;
+    mini_llm::model::GPT2Model& model_;
 public:
     Scheduler(MutexQueue<std::unique_ptr<Request>>& request_queue, MutexQueue<Response>& response_queue, uv_async_t* response_async)
         : request_queue_(request_queue),
           response_queue_(response_queue),
-          response_async_(response_async)
+          response_async_(response_async),
+          pool_(Pool::getInstance(C::DEFAULT_TOTAL_KV_BLOCKS)),
+        block_manager_(BlockManager::getInstance(pool_)),
+        model_(mini_llm::model::GPT2Model::get())
         {
-            Pool pool = Pool::getInstance();
-            block_manager_ = BlockManager::getInstance(pool);
-            model_ = GPT2Model::get();
         }
     ~Scheduler();
 

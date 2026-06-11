@@ -17,7 +17,7 @@ private:
         : total_blocks_(t_blocks), pool_(nullptr) {
         size_t slot =
             static_cast<size_t>(mini_llm::constants::DEFAULT_KV_BLOCK_SIZE) *
-            mini_llm::constants::GPT2_D_MODEL *
+            static_cast<size_t>(mini_llm::constants::GPT2_D_MODEL) *
             2 *
             sizeof(float);
 
@@ -30,7 +30,9 @@ private:
     }
 
 public:
-    static Pool& getInstance(int t_blocks = 0) {
+    static Pool& getInstance(
+        int t_blocks = mini_llm::constants::DEFAULT_TOTAL_KV_BLOCKS
+    ) {
         static Pool instance(t_blocks);
         return instance;
     }
@@ -51,6 +53,17 @@ public:
 
     int total_blocks() const {
         return total_blocks_;
+    }
+
+    size_t block_slot_size() const {
+        return
+            static_cast<size_t>(mini_llm::constants::DEFAULT_KV_BLOCK_SIZE) *
+            static_cast<size_t>(mini_llm::constants::GPT2_D_MODEL) *
+            2;
+    }
+
+    float* block_ptr(int block_id) const {
+        return pool_ + static_cast<size_t>(block_id) * block_slot_size();
     }
 };
 
