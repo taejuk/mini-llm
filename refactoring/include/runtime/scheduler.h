@@ -20,6 +20,7 @@ private:
     MutexQueue<std::unique_ptr<Request>> prefill_queue_;
     MutexQueue<std::unique_ptr<Request>> decode_queue_;
     MutexQueue<std::unique_ptr<Request>> finish_queue_;
+    MutexQueue<std::unique_ptr<Request>> deferred_queue_;
     MutexQueue<std::unique_ptr<Request>> cancel_queue_;
     std::atomic<bool> running_{false};
     std::thread worker_;

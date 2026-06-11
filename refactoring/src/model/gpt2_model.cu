@@ -152,7 +152,7 @@ static std::vector<int> argmax_cpu(const float* v, int row, int col) {
     return result;
 }
 
-std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>>& reqs) {
+std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs) {
     size_t seq_len = 0;
     for(const auto& req: reqs) seq_len += req->prompts.size();
     int pos = 0;
@@ -196,11 +196,13 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<unique_ptr<Rt::Request>
         reqs[i]->tokens.push_back(output_tokens[i]);
         bool done = reqs[i]->max_new_tokens <= 1;
         result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
+        if(done) reqs[i]->state = Rt::RequestState::Finished;
+        else reqs[i]->state = Rt::RequestState::DecodeReady;
     }
     return result;
 }
 
-std::vector<Rt::Response> GPT2Model::decode(std::vector<unique_ptr<Rt::Request>>& reqs) {
+std::vector<Rt::Response> GPT2Model::decode(std::vector<std::unique_ptr<Rt::Request>>& reqs) {
     size_t seq_len = reqs.size();
     // 마지막 token들을 가져온다.
 

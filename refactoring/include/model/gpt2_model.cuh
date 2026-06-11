@@ -4,6 +4,8 @@
 #include "runtime/pagekvcache.h"
 #include "runtime/block_manager.h"
 #include "constants.h"
+#include "runtime/request.h"
+#include "runtime/response.h"
 
 namespace mini_llm::model {
 namespace Rt = mini_llm::runtime;
