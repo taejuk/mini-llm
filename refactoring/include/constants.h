@@ -24,4 +24,5 @@ inline constexpr int MAX_SEQ = 1024;
 inline constexpr char* WEIGHTS_DIR = "weights";
 inline constexpr int MAX_BATCH_NUM = 16;
 
+constexpr int GPT2_EOS_TOKEN_ID = 50256;
 }

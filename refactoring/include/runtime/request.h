@@ -30,6 +30,7 @@ enum class RequestState {
 struct Request {
     uint64_t request_id = -1;
     std::vector<int> tokens;
+    int prompts_len;
     std::vector<PagedKVCache> layer_kv;
     int max_new_tokens = 8;
     RequestState state;
@@ -49,10 +50,10 @@ struct Request {
             // d_block_tables_e도 초기화해야 함.
             size_t len_per_pagedkv = (t.size() + max_tokens + mini_llm::constants::DEFAULT_KV_BLOCK_SIZE - 1) / mini_llm::constants::DEFAULT_KV_BLOCK_SIZE;
             offset = len_per_pagedkv * sizeof(int);
+            prompts_len = tokens.size();
           }
-    int required_blocks() {
-        int needed_per_layer = (tokens.size() + mini_llm::constants::DEFAULT_KV_BLOCK_SIZE - 1) / mini_llm::constants::DEFAULT_KV_BLOCK_SIZE;
-        return needed_per_layer * mini_llm::constants::GPT2_N_LAYERS;
+    bool isfinish() {
+        return tokens.size() >= (prompts_len + max_new_tokens);
     }
 };
 }

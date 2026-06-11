@@ -193,11 +193,8 @@ std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Req
     std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
     std::vector<Rt::Response> result;
     for(int i = 0; i < reqs.size(); i++) {
-        reqs[i]->tokens.push_back(output_tokens[i]);
-        bool done = reqs[i]->max_new_tokens <= 1;
+        bool done = reqs[i]->isfinish() || output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
         result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
-        if(done) reqs[i]->state = Rt::RequestState::Finished;
-        else reqs[i]->state = Rt::RequestState::DecodeReady;
     }
     return result;
 }

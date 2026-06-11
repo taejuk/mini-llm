@@ -57,6 +57,7 @@ private:
     bool try_admit_decode(std::unique_ptr<Request>& req);
 
     void drain_new_requests();
+    void admit_waiting_prefill();
     void retry_deferred_prefill();
     void retry_deferred_decode();
     void run_decode_batch();
