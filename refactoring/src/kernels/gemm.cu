@@ -408,8 +408,7 @@ void launch_gemm_bias(
     const float* A,
     const float* B,
     const float* bias,
-    float* C,
-    cudaStream_t stream
+    float* C
 ) {
     constexpr int numThreads = (BM / TM) * (BN / TN);
 
