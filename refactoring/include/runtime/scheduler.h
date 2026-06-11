@@ -3,6 +3,9 @@
 #include <uv.h>
 #include <atomic>
 #include <iostream>
+#include <deque>
+#include <memory>
+
 #include "model/gpt2_model.cuh"
 #include "runtime/request.h"
 #include "runtime/response.h"
@@ -38,9 +41,9 @@ public:
         : request_queue_(request_queue),
           response_queue_(response_queue),
           response_async_(response_async),
-          pool_(Pool::getInstance(C::DEFAULT_TOTAL_KV_BLOCKS)),
-        block_manager_(BlockManager::getInstance(pool_)),
-        model_(mini_llm::model::GPT2Model::get())
+          pool_(Pool::getInstance(mini_llm::constants::DEFAULT_TOTAL_KV_BLOCKS)),
+          block_manager_(BlockManager::getInstance(pool_)),
+          model_(mini_llm::model::GPT2Model::get())
         {
         }
     ~Scheduler();

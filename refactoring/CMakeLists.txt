@@ -20,6 +20,7 @@ add_library(mini_llm_kernels
     src/kernels/gelu.cu
     src/kernels/prefill/append_kv.cu
     src/kernels/prefill/flashattention.cu
+    src/kernels/decode/paged_attention.cu
 )
 
 target_include_directories(mini_llm_kernels PUBLIC
