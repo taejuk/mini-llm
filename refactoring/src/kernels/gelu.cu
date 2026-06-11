@@ -27,7 +27,7 @@ __global__ void gelu_kernel(float* x, int n) {
     }
 }
 
-void gelu(float* x, int n) {
+void gelu(float* x, int nums) {
     if (nums <= 0) {
         return;
     }

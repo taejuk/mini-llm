@@ -1,23 +1,31 @@
 #include "kernels/prefill/flashattention.cuh"
 
 namespace mini_llm::kernels {
+
 namespace C = mini_llm::constants;
 
 __device__ __forceinline__ float reduce_dhead64_sum(float partial) {
     __shared__ float warp_sums[Br][2];
-    int d = threadIdx.x; 
+
+    int d = threadIdx.x;
     int r = threadIdx.y;
+
     int warp_id = d / 32;
     int lane = d % 32;
+
     float sum = warp_reduce_sum(partial);
-    if(lane == 0) warp_sums[r][warp_id] = sum;
+
+    if (lane == 0) {
+        warp_sums[r][warp_id] = sum;
+    }
+
     __syncthreads();
 
-    float total = 0.0f;
-    if(lane == 0) {
-        total = warp_sums[r][0] + warp_sums[r][1];
+    if (lane == 0) {
+        float total = warp_sums[r][0] + warp_sums[r][1];
         warp_sums[r][0] = total;
     }
+
     __syncthreads();
 
     return warp_sums[r][0];
@@ -35,34 +43,49 @@ __global__ void flashattention_prefill_kernel(
     int d = threadIdx.x;
     int r = threadIdx.y;
 
+    int q_start = q_tile * Br;
+    int q = q_start + r;
+
     extern __shared__ float smem[];
 
     float* Q_shared = smem;
     float* K_shared = Q_shared + Br * C::GPT2_D_HEAD;
     float* V_shared = K_shared + Bc * C::GPT2_D_HEAD;
-    float* partial_shared = V_shared + Bc * C::GPT2_D_HEAD;
 
     int tid = threadIdx.y * blockDim.x + threadIdx.x;
     int nthreads = blockDim.x * blockDim.y;
 
-    Q_shared[r * C::GPT2_D_HEAD + d] = buf_qkv[(q_start + r)*3*C::GPT2_D_MODEL + hid * C::GPT2_D_HEAD + d];
+    if (q < seq_len && d < C::GPT2_D_HEAD) {
+        Q_shared[r * C::GPT2_D_HEAD + d] =
+            buf_qkv[
+                static_cast<size_t>(q) * 3 * C::GPT2_D_MODEL
+                + hid * C::GPT2_D_HEAD
+                + d
+            ];
+    } else if (d < C::GPT2_D_HEAD) {
+        Q_shared[r * C::GPT2_D_HEAD + d] = 0.0f;
+    }
+
     __syncthreads();
+
     float m = -CUDART_INF_F;
     float l = 0.0f;
     float o = 0.0f;
 
-    int q_tile_last = min(q_start + Br - 1, seq_len-1);
-    
-    for(int k_start = 0; k_start < seq_len; k_start += Bc) {
-        // K와 V를 가져온다.
-        if(k_start > q_tile_last) break;
+    int q_tile_last = min(q_start + Br - 1, seq_len - 1);
 
-        int k_tile_last = min(k_start + Bc - 1, seq_len-1);
-        bool full_visible_tile = (k_tile_last <= q_start);    
+    for (int k_start = 0; k_start < seq_len; k_start += Bc) {
+        if (k_start > q_tile_last) {
+            break;
+        }
+
+        int k_tile_last = min(k_start + Bc - 1, seq_len - 1);
+        bool full_visible_tile = (k_tile_last <= q_start);
+
         int d_head_vec4 = C::GPT2_D_HEAD / 4;
         int kv_vec_elems = Bc * d_head_vec4;
 
-        for(int i = tid; i < kv_vec_elems; i+=nthreads) {
+        for (int i = tid; i < kv_vec_elems; i += nthreads) {
             int kk = i / d_head_vec4;
             int d4 = i % d_head_vec4;
 
@@ -72,22 +95,23 @@ __global__ void flashattention_prefill_kernel(
             float4 k4;
             float4 v4;
 
-            if(k_abs < seq_len) {
-                const float* k_src = buf_qkv
-                    + (size_t)k_abs * 3 * C::GPT2_D_MODEL
+            if (k_abs < seq_len) {
+                const float* k_src =
+                    buf_qkv
+                    + static_cast<size_t>(k_abs) * 3 * C::GPT2_D_MODEL
                     + C::GPT2_D_MODEL
                     + hid * C::GPT2_D_HEAD
                     + dd;
 
-                const float* v_src = buf_qkv
-                    + (size_t)k_abs * 3 * C::GPT2_D_MODEL
+                const float* v_src =
+                    buf_qkv
+                    + static_cast<size_t>(k_abs) * 3 * C::GPT2_D_MODEL
                     + 2 * C::GPT2_D_MODEL
                     + hid * C::GPT2_D_HEAD
                     + dd;
-                
+
                 k4 = *reinterpret_cast<const float4*>(k_src);
                 v4 = *reinterpret_cast<const float4*>(v_src);
-
             } else {
                 k4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
                 v4 = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -99,22 +123,32 @@ __global__ void flashattention_prefill_kernel(
             *reinterpret_cast<float4*>(k_dst) = k4;
             *reinterpret_cast<float4*>(v_dst) = v4;
         }
+
         __syncthreads();
-        // QxK^T를 구한다
-        for(int kk = 0; kk < Bc; kk++) {
+
+        for (int kk = 0; kk < Bc; kk++) {
             int k_abs = k_start + kk;
+
             bool valid_q = q < seq_len;
-            bool valid_k = (k_abs < seq_len);
+            bool valid_k = k_abs < seq_len;
 
             bool causal;
-            if(full_visible_tile) causal = true;
-            else causal = k_abs <= q;
+            if (full_visible_tile) {
+                causal = true;
+            } else {
+                causal = k_abs <= q;
+            }
+
+            bool active = valid_q && valid_k && causal;
 
             float partial = 0.0f;
-	        bool active = valid_q && valid_k && causal;
-            if(active && d < d_head)
-                partial = Q_shared[r*d_head + d] * K_shared[kk * d_head + d];
-            
+
+            if (active && d < C::GPT2_D_HEAD) {
+                partial =
+                    Q_shared[r * C::GPT2_D_HEAD + d] *
+                    K_shared[kk * C::GPT2_D_HEAD + d];
+            }
+
             float score = reduce_dhead64_sum(partial) * scale;
 
             if (active && d < C::GPT2_D_HEAD) {
@@ -129,20 +163,21 @@ __global__ void flashattention_prefill_kernel(
                 l = l * alpha + p;
                 m = m_new;
             }
+
             __syncthreads();
         }
+
         __syncthreads();
     }
 
     if (q < seq_len && d < C::GPT2_D_HEAD) {
         buf_O[
-            (size_t)q * C::GPT2_D_MODEL
+            static_cast<size_t>(q) * C::GPT2_D_MODEL
             + hid * C::GPT2_D_HEAD
             + d
         ] = o / l;
     }
 }
-
 
 void flashattention_prefill(
     const float* buf_qkv,
@@ -150,11 +185,31 @@ void flashattention_prefill(
     int seq_len,
     float scale
 ) {
-    if(seq_len <= 0) return;
+    if (seq_len <= 0) {
+        return;
+    }
 
-    dim3 grid(C::GPT2_N_HEADS, (seq_len + Br -1)/ Br);
-    dim3 block(C::GPT2_D_HEAD, Br);
+    dim3 grid(
+        C::GPT2_N_HEADS,
+        (seq_len + Br - 1) / Br
+    );
 
-    flashattention_prefill_kernel<<<grid, block>>>(buf_qkv, buf_O, seq_len, scale);
+    dim3 block(
+        C::GPT2_D_HEAD,
+        Br
+    );
+
+    size_t shared_bytes =
+        static_cast<size_t>(Br) * C::GPT2_D_HEAD * sizeof(float) +
+        static_cast<size_t>(Bc) * C::GPT2_D_HEAD * sizeof(float) +
+        static_cast<size_t>(Bc) * C::GPT2_D_HEAD * sizeof(float);
+
+    flashattention_prefill_kernel<<<grid, block, shared_bytes>>>(
+        buf_qkv,
+        buf_O,
+        seq_len,
+        scale
+    );
 }
-}
+
+} // namespace mini_llm::kernels

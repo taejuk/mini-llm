@@ -1,5 +1,5 @@
 #include "kernels/layernorm.cuh"
-
+#include "constants.h"
 namespace mini_llm::kernels {
 __global__ void layernorm_kernel(
     const float* __restrict__ x,
@@ -58,7 +58,7 @@ void layernorm(
     float* y,
     int num_rows,
     int num_cols,
-    float eps = 1e-5f
+    float eps
 ) {
     int VEC = 4;
     int THREADS = num_cols / VEC;
