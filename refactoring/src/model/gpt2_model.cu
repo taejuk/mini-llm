@@ -549,8 +549,8 @@ std::vector<Rt::Response> GPT2Model::decode(
         );
     }
 
-    CUDA_CHECK(cudaFree(d_block_offsets));
-    CUDA_CHECK(cudaFree(d_num_tokens));
+    cudaFree(d_block_offsets);
+    cudaFree(d_num_tokens);
 
     Kernel::layernorm(
         buf_x,
