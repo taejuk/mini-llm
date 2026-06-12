@@ -362,7 +362,7 @@ int main() {
 
     // 큰 size는 naive가 오래 걸린다.
     // 빠르게 보고 싶으면 {1024, 2048, 4096} 정도로 줄이면 된다.
-    const int sizes[] = {1024, 2048, 4096, 8192};
+    const int sizes[] = {1024, 2048, 4096};
     const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
     const int warmup = 3;
