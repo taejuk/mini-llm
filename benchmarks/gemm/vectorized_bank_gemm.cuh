@@ -3,19 +3,15 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 
-#define BM 64
-#define BN 64
-#define BK 16
-#define TM 8
-#define TN 8
+#define VBANK_BM 64
+#define VBANK_BN 64
+#define VBANK_BK 8
+#define VBANK_TM 8
+#define VBANK_TN 8
 
-// sA is stored as transposed layout: sA[k][row].
-// If stride is BM=64, then stride % 32 == 0,
-// so different k values can map to the same shared memory bank.
-// Add padding to reduce bank conflicts while keeping float4 alignment.
-#define SA_STRIDE (BM + 4)
+#define VBANK_SA_STRIDE (VBANK_BM + 4)
 
-#define NUM_THREADS ((BM / TM) * (BN / TN))
+#define VBANK_NUM_THREADS ((VBANK_BM / VBANK_TM) * (VBANK_BN / VBANK_TN))
 
 __global__ void sgemm_vectorized_bank(
     int M,
@@ -30,75 +26,44 @@ __global__ void sgemm_vectorized_bank(
     const int cRow = blockIdx.y;
     const int cCol = blockIdx.x;
 
-    const int threadRow = threadIdx.x / (BN / TN);
-    const int threadCol = threadIdx.x % (BN / TN);
+    const int threadRow = threadIdx.x / (VBANK_BN / VBANK_TN);
+    const int threadCol = threadIdx.x % (VBANK_BN / VBANK_TN);
 
-    // sA layout:
-    //   logical A tile: [BM x BK]
-    //   shared layout: [BK x SA_STRIDE]
-    //   sA[k][row]
-    //
-    // sB layout:
-    //   logical B tile: [BK x BN]
-    //   shared layout: [BK x BN]
-    //   sB[k][col]
-    __shared__ float sA[BK * SA_STRIDE];
-    __shared__ float sB[BK * BN];
+    __shared__ float sA[VBANK_BK * VBANK_SA_STRIDE];
+    __shared__ float sB[VBANK_BK * VBANK_BN];
 
-    A += cRow * BM * K;
-    B += cCol * BN;
-    C += cRow * BM * N + cCol * BN;
+    A += cRow * VBANK_BM * K;
+    B += cCol * VBANK_BN;
+    C += cRow * VBANK_BM * N + cCol * VBANK_BN;
 
-    float threadResults[TM][TN] = {0.0f};
+    float threadResults[VBANK_TM][VBANK_TN] = {0.0f};
 
-    float regA[TM];
-    float regB[TN];
+    float regA[VBANK_TM];
+    float regB[VBANK_TN];
 
-    for (int bkIdx = 0; bkIdx < K; bkIdx += BK) {
-        // ------------------------------------------------------------
-        // Load A tile from global memory to shared memory.
-        //
-        // Global A tile shape:
-        //   A[BM x BK]
-        //
-        // Each row has BK=8 floats.
-        // With float4, each row has 2 vector loads.
-        //
-        // Store transposed into shared memory:
-        //   sA[k][row]
-        //
-        // Padding SA_STRIDE reduces bank conflict during this transpose store.
-        // ------------------------------------------------------------
-        for (int i = 0; i < (BM * BK) / (NUM_THREADS * 4); i++) {
-            int pairIdx = threadIdx.x + i * NUM_THREADS;
+    for (int bkIdx = 0; bkIdx < K; bkIdx += VBANK_BK) {
+        for (int i = 0; i < (VBANK_BM * VBANK_BK) / (VBANK_NUM_THREADS * 4); i++) {
+            int pairIdx = threadIdx.x + i * VBANK_NUM_THREADS;
 
-            int rowA = pairIdx / (BK / 4);
-            int colA4 = pairIdx % (BK / 4);
+            int rowA = pairIdx / (VBANK_BK / 4);
+            int colA4 = pairIdx % (VBANK_BK / 4);
 
             const float4 tmp =
                 reinterpret_cast<const float4*>(
                     &A[rowA * K + colA4 * 4]
                 )[0];
 
-            sA[(colA4 * 4 + 0) * SA_STRIDE + rowA] = tmp.x;
-            sA[(colA4 * 4 + 1) * SA_STRIDE + rowA] = tmp.y;
-            sA[(colA4 * 4 + 2) * SA_STRIDE + rowA] = tmp.z;
-            sA[(colA4 * 4 + 3) * SA_STRIDE + rowA] = tmp.w;
+            sA[(colA4 * 4 + 0) * VBANK_SA_STRIDE + rowA] = tmp.x;
+            sA[(colA4 * 4 + 1) * VBANK_SA_STRIDE + rowA] = tmp.y;
+            sA[(colA4 * 4 + 2) * VBANK_SA_STRIDE + rowA] = tmp.z;
+            sA[(colA4 * 4 + 3) * VBANK_SA_STRIDE + rowA] = tmp.w;
         }
 
-        // ------------------------------------------------------------
-        // Load B tile from global memory to shared memory.
-        //
-        // Global B tile shape:
-        //   B[BK x BN]
-        //
-        // B is row-major, so loading continuous columns using float4 is coalesced.
-        // ------------------------------------------------------------
-        for (int i = 0; i < (BK * BN) / (NUM_THREADS * 4); i++) {
-            int pairIdx = threadIdx.x + i * NUM_THREADS;
+        for (int i = 0; i < (VBANK_BK * VBANK_BN) / (VBANK_NUM_THREADS * 4); i++) {
+            int pairIdx = threadIdx.x + i * VBANK_NUM_THREADS;
 
-            int rowB = pairIdx / (BN / 4);
-            int colB4 = pairIdx % (BN / 4);
+            int rowB = pairIdx / (VBANK_BN / 4);
+            int colB4 = pairIdx % (VBANK_BN / 4);
 
             const float4 tmp =
                 reinterpret_cast<const float4*>(
@@ -106,27 +71,22 @@ __global__ void sgemm_vectorized_bank(
                 )[0];
 
             reinterpret_cast<float4*>(
-                &sB[rowB * BN + colB4 * 4]
+                &sB[rowB * VBANK_BN + colB4 * 4]
             )[0] = tmp;
         }
 
         __syncthreads();
 
-        // Move A/B base pointers to next K tile.
-        A += BK;
-        B += BK * N;
+        A += VBANK_BK;
+        B += VBANK_BK * N;
 
-        // ------------------------------------------------------------
-        // Compute C[TM x TN] per thread.
-        //
-        // Each thread computes 8x8 output elements.
-        // A values are reused across TN columns.
-        // B values are reused across TM rows.
-        // ------------------------------------------------------------
         #pragma unroll
-        for (int dotIdx = 0; dotIdx < BK; dotIdx++) {
-            const int aOffset = dotIdx * SA_STRIDE + threadRow * TM;
-            const int bOffset = dotIdx * BN + threadCol * TN;
+        for (int dotIdx = 0; dotIdx < VBANK_BK; dotIdx++) {
+            const int aOffset =
+                dotIdx * VBANK_SA_STRIDE + threadRow * VBANK_TM;
+
+            const int bOffset =
+                dotIdx * VBANK_BN + threadCol * VBANK_TN;
 
             const float4 a0 =
                 reinterpret_cast<float4*>(&sA[aOffset])[0];
@@ -138,7 +98,6 @@ __global__ void sgemm_vectorized_bank(
             regA[1] = a0.y;
             regA[2] = a0.z;
             regA[3] = a0.w;
-
             regA[4] = a1.x;
             regA[5] = a1.y;
             regA[6] = a1.z;
@@ -154,16 +113,15 @@ __global__ void sgemm_vectorized_bank(
             regB[1] = b0.y;
             regB[2] = b0.z;
             regB[3] = b0.w;
-
             regB[4] = b1.x;
             regB[5] = b1.y;
             regB[6] = b1.z;
             regB[7] = b1.w;
 
             #pragma unroll
-            for (int i = 0; i < TM; i++) {
+            for (int i = 0; i < VBANK_TM; i++) {
                 #pragma unroll
-                for (int j = 0; j < TN; j++) {
+                for (int j = 0; j < VBANK_TN; j++) {
                     threadResults[i][j] += regA[i] * regB[j];
                 }
             }
@@ -172,19 +130,13 @@ __global__ void sgemm_vectorized_bank(
         __syncthreads();
     }
 
-    // ------------------------------------------------------------
-    // Store C tile.
-    //
-    // Each thread stores 8x8 values.
-    // Store uses float4.
-    // ------------------------------------------------------------
     #pragma unroll
-    for (int i = 0; i < TM; i++) {
+    for (int i = 0; i < VBANK_TM; i++) {
         float* c0_ptr =
-            &C[(threadRow * TM + i) * N + threadCol * TN];
+            &C[(threadRow * VBANK_TM + i) * N + threadCol * VBANK_TN];
 
         float* c1_ptr =
-            &C[(threadRow * TM + i) * N + threadCol * TN + 4];
+            &C[(threadRow * VBANK_TM + i) * N + threadCol * VBANK_TN + 4];
 
         if (beta == 0.0f) {
             reinterpret_cast<float4*>(c0_ptr)[0] = make_float4(
@@ -231,18 +183,15 @@ void vectorized_bank_gemm(
     float beta,
     float* C
 ) {
-    // This kernel is optimized for benchmark sizes that are multiples of
-    // BM, BN, and BK.
-    //
-    // The original kernel also assumes aligned float4 loads/stores.
-    // For general M/N/K, add boundary handling or use a fallback kernel.
-    if ((M % BM) != 0 || (N % BN) != 0 || (K % BK) != 0) {
+    if ((M % VBANK_BM) != 0 ||
+        (N % VBANK_BN) != 0 ||
+        (K % VBANK_BK) != 0) {
         printf(
-            "vectorized_gemm requires M %% %d == 0, N %% %d == 0, K %% %d == 0. "
-            "Got M=%d, N=%d, K=%d\n",
-            BM,
-            BN,
-            BK,
+            "vectorized_bank_gemm requires M %% %d == 0, "
+            "N %% %d == 0, K %% %d == 0. Got M=%d, N=%d, K=%d\n",
+            VBANK_BM,
+            VBANK_BN,
+            VBANK_BK,
             M,
             N,
             K
@@ -250,14 +199,12 @@ void vectorized_bank_gemm(
         return;
     }
 
-    // blockIdx.x corresponds to column tile.
-    // blockIdx.y corresponds to row tile.
     dim3 gridDim(
-        (N + BN - 1) / BN,
-        (M + BM - 1) / BM
+        (N + VBANK_BN - 1) / VBANK_BN,
+        (M + VBANK_BM - 1) / VBANK_BM
     );
 
-    dim3 blockDim(NUM_THREADS);
+    dim3 blockDim(VBANK_NUM_THREADS);
 
     sgemm_vectorized_bank<<<gridDim, blockDim>>>(
         M,
