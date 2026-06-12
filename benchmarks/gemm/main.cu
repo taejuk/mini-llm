@@ -61,7 +61,7 @@ static void cublas_init() {
 
     // Volta Tensor Core용. FP32 SGEMM에는 사실상 영향이 없고,
     // cublasGemmEx half x half -> float에서 Tensor Core 경로를 활성화한다.
-    CUBLAS_CHECK(cublasSetMathMode(g_cublas_handle, CUBLAS_TENSOR_OP_MATH));
+    //CUBLAS_CHECK(cublasSetMathMode(g_cublas_handle, CUBLAS_TENSOR_OP_MATH));
 }
 
 static void cublas_destroy() {
