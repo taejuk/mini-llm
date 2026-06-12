@@ -17,6 +17,7 @@
 #include "vectorized_gemm.cuh"
 #include "cublas_gemm.cuh"
 #include "wmma_gemm.cuh"
+#include "shared_tensor_core.cuh"
 
 static void rand_init(float* h, int n) {
     for (int i = 0; i < n; i++) {
@@ -209,7 +210,7 @@ int main() {
 
     printf("─────────────────────────────────────────────────────────────\n");
 
-    const int sizes[] = {4096};
+    const int sizes[] = {1024,2048,4096,8192};
     const int n_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
     for (int si = 0; si < n_sizes; si++) {
@@ -296,7 +297,7 @@ int main() {
             runs,
             "cublas"
         );
-
+        
         float ms = benchmark(
             naive_gemm,
             M,
@@ -416,7 +417,29 @@ int main() {
             K,
             standard
         );
+        ms = benchmark_wmma(
+    shared_tensor_core_gemm,
+    M,
+    N,
+    K,
+    alpha,
+    dA_half,
+    dB_half,
+    beta,
+    dC,
+    warmup,
+    runs,
+    "shared tensor core"
+);
 
+print_wmma_result(
+    "shared tensor core",
+    ms,
+    M,
+    N,
+    		K,
+             standard
+        );
         nvtxRangePop();
 
         cudaFree(dA);
