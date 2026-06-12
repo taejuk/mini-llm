@@ -422,7 +422,7 @@ int main() {
         half *dB_half = nullptr;
 
         CUDA_CHECK(cudaMalloc(&dA, bytes_A_f32));
-        CUDA_CHECK(cudaMoalloc(&dAT, bytes_A_f32));
+        CUDA_CHECK(cudaMalloc(&dAT, bytes_A_f32));
         CUDA_CHECK(cudaMalloc(&dB, bytes_B_f32));
         CUDA_CHECK(cudaMalloc(&dC, bytes_C_f32));
 

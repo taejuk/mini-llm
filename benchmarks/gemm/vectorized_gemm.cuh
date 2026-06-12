@@ -2,7 +2,7 @@
 
 #define BM 64
 #define BN 64
-#define BK 8
+#define BK 16
 #define TM 8
 #define TN 8
 
