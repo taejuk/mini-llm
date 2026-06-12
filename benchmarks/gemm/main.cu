@@ -17,6 +17,7 @@
 #include "blocktiling_1d_gemm.cuh"
 #include "blocktiling_2d_gemm.cuh"
 #include "vectorized_gemm.cuh"
+#include "vectorized_bank_gemm.cuh"
 
 
 #include "wmma_gemm.cuh"
@@ -569,6 +570,23 @@ int main() {
             "vectorized"
         );
         print_fp32_result("vectorized", ms, M, N, K, peak_fp32_gflops, cublas_sgemm_ms);
+
+        ms = benchmark_fp32(
+            vectorized_bank_gemm,
+            M,
+            N,
+            K,
+            alpha,
+            dA,
+            dB,
+            beta,
+            dC,
+            warmup,
+            runs,
+            "vectorized"
+        );
+        print_fp32_result("vectorized", ms, M, N, K, peak_fp32_gflops, cublas_sgemm_ms);
+
 
         // ---------------------------------------------------------------------
         // FP16 Tensor Core baseline
