@@ -18,6 +18,8 @@
 #include "cublas_gemm.cuh"
 #include "wmma_gemm.cuh"
 #include "shared_tensor_core.cuh"
+#include "tensor_core_v2_gemm.cuh"
+
 
 static void rand_init(float* h, int n) {
     for (int i = 0; i < n; i++) {
@@ -418,28 +420,53 @@ int main() {
             standard
         );
         ms = benchmark_wmma(
-    shared_tensor_core_gemm,
-    M,
-    N,
-    K,
-    alpha,
-    dA_half,
-    dB_half,
-    beta,
-    dC,
-    warmup,
-    runs,
-    "shared tensor core"
-);
+            shared_tensor_core_gemm,
+            M,
+            N,
+            K,
+            alpha,
+            dA_half,
+            dB_half,
+            beta,
+            dC,
+            warmup,
+            runs,
+            "shared tensor core"
+        );
 
-print_wmma_result(
-    "shared tensor core",
-    ms,
-    M,
-    N,
+        print_wmma_result(
+            "shared tensor core",
+            ms,
+            M,
+            N,
     		K,
              standard
         );
+
+        ms = benchmark_wmma(
+            tensor_core_v2_gemm,
+            M,
+            N,
+            K,
+            alpha,
+            dA_half,
+            dB_half,
+            beta,
+            dC,
+            warmup,
+            runs,
+            "tensor core v2"
+        );
+
+        print_wmma_result(
+            "tensor core v2",
+            ms,
+            M,
+            N,
+            K,
+            standard
+        );
+
         nvtxRangePop();
 
         cudaFree(dA);
