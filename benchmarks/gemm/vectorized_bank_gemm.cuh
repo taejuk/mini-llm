@@ -221,7 +221,7 @@ __global__ void sgemm_vectorized_bank(
     }
 }
 
-void vectorized_gemm_bank(
+void vectorized_bank_gemm(
     int M,
     int N,
     int K,
