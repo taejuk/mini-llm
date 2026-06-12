@@ -18,7 +18,7 @@
 #include "blocktiling_2d_gemm.cuh"
 #include "vectorized_gemm.cuh"
 #include "vectorized_bank_gemm.cuh"
-
+#include "vectorized_column_major_gemm.cuh"
 
 #include "wmma_gemm.cuh"
 #include "shared_tensor_core.cuh"
@@ -414,6 +414,7 @@ int main() {
         // Device memory
         // ---------------------------------------------------------------------
         float *dA = nullptr;
+        float *dAT = nullptr;
         float *dB = nullptr;
         float *dC = nullptr;
 
@@ -421,6 +422,7 @@ int main() {
         half *dB_half = nullptr;
 
         CUDA_CHECK(cudaMalloc(&dA, bytes_A_f32));
+        CUDA_CHECK(cudaMoalloc(&dAT, bytes_A_f32));
         CUDA_CHECK(cudaMalloc(&dB, bytes_B_f32));
         CUDA_CHECK(cudaMalloc(&dC, bytes_C_f32));
 
@@ -429,7 +431,8 @@ int main() {
 
         CUDA_CHECK(cudaMemcpy(dA, hA, bytes_A_f32, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB, hB, bytes_B_f32, cudaMemcpyHostToDevice));
-
+        transpose_A_for_vectorized_column_major_a(M, K, dA, dAT);
+        cudaDeviceSynchronize();
         CUDA_CHECK(cudaMemcpy(dA_half, hA_half, bytes_A_f16, cudaMemcpyHostToDevice));
         CUDA_CHECK(cudaMemcpy(dB_half, hB_half, bytes_B_f16, cudaMemcpyHostToDevice));
 
@@ -585,8 +588,23 @@ int main() {
             runs,
             "vectorized"
         );
-        print_fp32_result("vectorized", ms, M, N, K, peak_fp32_gflops, cublas_sgemm_ms);
+        print_fp32_result("vectorized bank conflict", ms, M, N, K, peak_fp32_gflops, cublas_sgemm_ms);
 
+        ms = benchmark_fp32(
+            vectorized_column_major_gemm,
+            M,
+            N,
+            K,
+            alpha,
+            dAT,
+            dB,
+            beta,
+            dC,
+            warmup,
+            runs,
+            "vectorized"
+        );
+        print_fp32_result("vectorized column major", ms, M, N, K, peak_fp32_gflops, cublas_sgemm_ms);
 
         // ---------------------------------------------------------------------
         // FP16 Tensor Core baseline
@@ -677,6 +695,7 @@ int main() {
         nvtxRangePop();
 
         CUDA_CHECK(cudaFree(dA));
+        CUDA_CHECK(cudaFree(dAT));
         CUDA_CHECK(cudaFree(dB));
         CUDA_CHECK(cudaFree(dC));
 
