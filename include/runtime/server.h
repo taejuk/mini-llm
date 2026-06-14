@@ -14,6 +14,8 @@
 #include "runtime/request.h"
 #include "runtime/response.h"
 #include "runtime/scheduler.h"
+#include "runtime/inference_backend.h"
+#include "runtime/kv_allocator.h"
 #include "constants.h"
 namespace mini_llm::runtime {
 class ServerContext;
@@ -49,6 +51,9 @@ private:
 
     std::atomic<bool> running_{false};
     std::unordered_map<uint64_t, ClientConnection*> req_to_client_;
+    std::unique_ptr<Scheduler> scheduler_;
+    std::unique_ptr<InferenceBackend> backend_;
+    std::unique_ptr<KvAllocator> kv_allocator_;
     std::unique_ptr<Scheduler> scheduler_;
 public:
     ServerContext();

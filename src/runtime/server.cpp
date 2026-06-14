@@ -1,5 +1,12 @@
 #include "runtime/server.h"
 
+#if MINI_LLM_USE_MOCK_BACKEND
+#include "runtime/mock_backend.h"
+#include "runtime/mock_kv_allocator.h"
+#else
+#include "runtime/gpt2_backend.h"
+#include "runtime/real_kv_allocator.h"
+#endif
 
 namespace mini_llm::runtime {
 
@@ -65,16 +72,25 @@ bool ServerContext::start(const char* host, int port) {
     }
 
     running_.store(true);
-    // scheduler 초기화
+
+    #if MINI_LLM_USE_MOCK_BACKEND
+    backend_ = std::make_unique<MockBackend>();
+    kv_allocator_ = std::make_unique<MockKvAllocator>();
+    #else
+    backend_ = std::make_unique<Gpt2Backend>();
+    kv_allocator_ = std::make_unique<RealKvAllocator>();
+    #endif
+
     uv_async_t* response_async = &response_async_;
+
     scheduler_ = std::make_unique<Scheduler>(
         request_queue_,
         response_queue_,
-        response_async
+        response_async,
+        *backend_,
+        *kv_allocator_
     );
-    // gpu_worker_ = std::thread([this] {
-    //     this->gpu_worker_loop();
-    // });
+
     scheduler_->start();
     std::cout << "[server] listening on " << host << ":" << port << "\n";
 

@@ -25,43 +25,12 @@ void Scheduler::stop() {
 }
 
 bool Scheduler::try_admit_prefill(std::unique_ptr<Request>& req) {
-    int need_blocks_per_layer = (req->tokens.size() + C::DEFAULT_KV_BLOCK_SIZE - 1) / C::DEFAULT_KV_BLOCK_SIZE;
-    int total_need = need_blocks_per_layer * C::GPT2_N_LAYERS;
-
-    if (!block_manager_.can_allocate(total_need)) {
-        return false;
-    }
-
-    for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
-        for (int i = 0; i < need_blocks_per_layer; i++) {
-            int block_id = block_manager_.allocate_one();
-            req->layer_kv[layer].append_block(block_id);
-        }
-    }
-
-    return true;
+    return kv_allocator_.allocate_prefill(*req);
 }
 
+
 bool Scheduler::try_admit_decode(std::unique_ptr<Request>& req) {
-    int cached_tokens = req->layer_kv[0].num_tokens_;
-
-    int need_blocks_per_layer =
-        (cached_tokens % C::DEFAULT_KV_BLOCK_SIZE) == 0 ? 1 : 0;
-
-    int total_need = need_blocks_per_layer * C::GPT2_N_LAYERS;
-
-    if (!block_manager_.can_allocate(total_need)) {
-        return false;
-    }
-
-    for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
-        for (int i = 0; i < need_blocks_per_layer; i++) {
-            int block_id = block_manager_.allocate_one();
-            req->layer_kv[layer].append_block(block_id);
-        }
-    }
-
-    return true;
+    return kv_allocator_.allocate_decode(*req);
 }
 
 void Scheduler::drain_new_requests() {
@@ -145,7 +114,9 @@ void Scheduler::run_decode_batch() {
             continue;
         }
 
-        std::vector<Response> responses = model_.decode(batch);
+        
+        std::vector<Response> responses = backend_.decode(batch);
+
 
         if (responses.size() != batch.size()) {
             std::cerr << "Scheduler: decode response size mismatch. "
@@ -225,7 +196,7 @@ void Scheduler::run_prefill_batch() {
             break;
         }
 
-        std::vector<Response> responses = model_.prefill(batch);
+        std::vector<Response> responses = backend_.prefill(batch);
 
         for (size_t i = 0; i < batch.size(); i++) {
             auto req = std::move(batch[i]);
@@ -254,10 +225,8 @@ void Scheduler::run_prefill_batch() {
             has_resp = true;
 
             if (resp.finished) {
-                for (auto& kv : req->layer_kv) {
-                    block_manager_.free(kv.block_table_);
-                    kv.reset();
-                }
+                
+                kv_allocator_.free_request(*req);
 
                 req->state = RequestState::Finished;
                 finish_queue_.push_back(std::move(req));

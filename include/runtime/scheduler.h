@@ -6,12 +6,12 @@
 #include <deque>
 #include <memory>
 
-#include "model/gpt2_model.cuh"
+
 #include "runtime/request.h"
 #include "runtime/response.h"
 #include "runtime/mutex_queue.h"
-#include "runtime/block_manager.h"
-#include "runtime/pool.cuh"
+#include "runtime/inference_backend.h"
+#include "runtime/kv_allocator.h"
 namespace mini_llm::runtime {
 class Scheduler {
 // Server 관련 변수들
@@ -33,19 +33,23 @@ private:
     std::deque<std::unique_ptr<Request>> cancel_queue_;
     std::atomic<bool> running_{false};
     std::thread worker_;
-    mini_llm::runtime::Pool& pool_;
-    mini_llm::runtime::BlockManager& block_manager_;
-    mini_llm::model::GPT2Model& model_;
+    InferenceBackend& backend_;
+    KvAllocator& kv_allocator_;
 public:
-    Scheduler(MutexQueue<std::unique_ptr<Request>>& request_queue, MutexQueue<Response>& response_queue, uv_async_t* response_async)
-        : request_queue_(request_queue),
-          response_queue_(response_queue),
-          response_async_(response_async),
-          pool_(Pool::getInstance(mini_llm::constants::DEFAULT_TOTAL_KV_BLOCKS)),
-          block_manager_(BlockManager::getInstance(pool_)),
-          model_(mini_llm::model::GPT2Model::get())
-        {
-        }
+    Scheduler(
+        MutexQueue<std::unique_ptr<Request>>& request_queue,
+        MutexQueue<Response>& response_queue,
+        uv_async_t* response_async,
+        InferenceBackend& backend,
+        KvAllocator& kv_allocator
+    )
+    : request_queue_(request_queue),
+      response_queue_(response_queue),
+      response_async_(response_async),
+      backend_(backend),
+      kv_allocator_(kv_allocator)   
+    {
+    }
     ~Scheduler();
 
     Scheduler(const Scheduler&) = delete;
