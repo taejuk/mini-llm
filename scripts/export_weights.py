@@ -13,7 +13,11 @@ import numpy as np
 import torch
 from transformers import GPT2Model
 
-SAVE_DIR = os.path.dirname(os.path.abspath(__file__))   # weights/ 폴더 자체
+SAVE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "weights"
+)
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 def save(arr: np.ndarray, name: str):
     path = os.path.join(SAVE_DIR, name)
