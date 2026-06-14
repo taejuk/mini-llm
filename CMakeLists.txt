@@ -117,3 +117,4 @@ add_kernel_test(test_append_kv tests/cpp/test_append_kv.cu)
 add_kernel_test(test_flashattention tests/cpp/test_flashattention.cu)
 
 add_model_test(test_gpt2_prefill_logits tests/cpp/test_gpt2_prefill_logits.cu)
+add_model_test(test_gpt2_decode_logits tests/cpp/test_gpt2_decode_logits.cu)

@@ -6,12 +6,8 @@ model = GPT2Model.from_pretrained("gpt2")
 
 sequence = "Hello, my dog is cute"
 inputs = tokenizer(sequence, return_tensors="pt")
-print(inputs)
+# embedding 결과이다.
+outputs = model(**inputs)
+# embedding 결과를 쓰고
 
-# token embedding이 정상적으로 되는가?
-
-# logit이 정상적으로 구해지는가?
-
-
-
-
+# 
