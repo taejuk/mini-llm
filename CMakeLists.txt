@@ -96,4 +96,4 @@ add_kernel_test(test_layernorm tests/cpp/test_layernorm.cu)
 add_kernel_test(test_gemm tests/cpp/test_gemm.cu)
 add_kernel_test(test_embedding tests/cpp/test_embedding.cu)
 add_kernel_test(test_append_kv tests/cpp/test_append_kv.cu)
-
+add_kernel_test(test_flashattention tests/cpp/test_flashattention.cu)
