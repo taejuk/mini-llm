@@ -51,7 +51,7 @@ private:
 
     std::atomic<bool> running_{false};
     std::unordered_map<uint64_t, ClientConnection*> req_to_client_;
-    std::unique_ptr<Scheduler> scheduler_;
+
     std::unique_ptr<InferenceBackend> backend_;
     std::unique_ptr<KvAllocator> kv_allocator_;
     std::unique_ptr<Scheduler> scheduler_;

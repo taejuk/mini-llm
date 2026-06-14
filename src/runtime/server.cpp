@@ -1,5 +1,5 @@
 #include "runtime/server.h"
-
+#include <sstream>
 #if MINI_LLM_USE_MOCK_BACKEND
 #include "runtime/mock_backend.h"
 #include "runtime/mock_kv_allocator.h"
@@ -9,6 +9,22 @@
 #endif
 
 namespace mini_llm::runtime {
+
+std::vector<int> parseRequest(const std::string& line) {
+    std::vector<int> tokens;
+    std::istringstream iss(line);
+
+    int token = 0;
+    while (iss >> token) {
+        tokens.push_back(token);
+    }
+
+    return tokens;
+}
+
+std::string tokenToString(int token) {
+    return std::to_string(token);
+}
 
 ServerContext::ServerContext() {
     loop_ = uv_default_loop();
@@ -307,16 +323,25 @@ void ServerContext::on_read(
 }
 
 void ServerContext::on_response_async() {
-    std::vector<Response> responses;
-    response_queue_.drain(responses);
+    Response resp;
 
-    for (auto& resp : responses) {
-        ClientConnection* client = req_to_client_[resp.request_id];
-        if (client == nullptr || client->closed) {
+    while (response_queue_.try_pop(resp)) {
+        auto it = req_to_client_.find(resp.request_id);
+
+        if (it == req_to_client_.end()) {
             continue;
         }
 
-        std::string data = tokensToString(resp.tokens);
+        ClientConnection* client = it->second;
+
+        if (client == nullptr || client->closed) {
+            if (resp.finished) {
+                req_to_client_.erase(it);
+            }
+            continue;
+        }
+
+        std::string data = tokenToString(resp.token);
 
         if (resp.finished) {
             data += " [DONE]";
@@ -325,8 +350,13 @@ void ServerContext::on_response_async() {
         data += "\n";
 
         enqueue_write(client, std::move(data));
+
+        if (resp.finished) {
+            req_to_client_.erase(it);
+        }
     }
 }
+
 
 void ServerContext::enqueue_write(
     ClientConnection* client,

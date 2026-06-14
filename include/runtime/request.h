@@ -4,7 +4,6 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
-#include <cuda_runtime.h>
 
 #include "runtime/pagekvcache.h"
 #include "constants.h"

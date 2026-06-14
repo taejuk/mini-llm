@@ -151,10 +151,7 @@ void Scheduler::run_decode_batch() {
             has_resp = true;
 
             if (resp.finished) {
-                for (auto& kv : req->layer_kv) {
-                    block_manager_.free(kv.block_table_);
-                    kv.reset();
-                }
+                kv_allocator_.free_request(*req);
 
                 req->state = RequestState::Finished;
                 finish_queue_.push_back(std::move(req));
