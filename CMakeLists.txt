@@ -67,6 +67,21 @@ if(NEED_CUDA)
         mini_llm_kernels
         CUDA::cudart
     )
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/gpt2/bench_batch_vs_single.cu")
+        add_executable(bench_batch_vs_single
+            benchmarks/gpt2/bench_batch_vs_single.cu
+        )
+
+        target_include_directories(bench_batch_vs_single PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+
+        target_link_libraries(bench_batch_vs_single PRIVATE
+            mini_llm_model
+            CUDA::cudart
+        )
+    endif()
 endif()
 
 if(BUILD_RUNTIME)
