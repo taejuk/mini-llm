@@ -20,6 +20,8 @@ __global__ void gelu_kernel(float* x, int n) {
         xv.y = gelu_one(xv.y);
         xv.z = gelu_one(xv.z);
         xv.w = gelu_one(xv.w);
+
+	reinterpret_cast<float4*>(x)[vec_idx] = xv;
     } else {
         for(int i = base; i < n; i++) {
             x[i] = gelu_one(x[i]);
