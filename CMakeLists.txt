@@ -34,6 +34,7 @@ target_link_libraries(mini_llm_kernels PUBLIC CUDA::cudart)
 # model 라이브러리 생성
 add_library(mini_llm_model
     src/model/gpt2_model.cu
+    src/model/gpt2_test_api.cu
 )
 target_include_directories(mini_llm_model PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
