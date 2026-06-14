@@ -91,6 +91,13 @@ public:
     std::vector<Rt::Response> decode(
         std::vector<std::unique_ptr<Rt::Request>>& reqs
     );
+
+    // Test/debug helper: run the normal prefill path and return the last-token
+    // logits copied from the model-owned host buffer. This is intended for
+    // end-to-end parity tests against HuggingFace GPT2LMHeadModel.
+    std::vector<float> prefill_logits_for_test(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs
+    );
 };
 
 } // namespace mini_llm::model
