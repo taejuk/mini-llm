@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <math.h>
 
-#define CACHE_BLOCK_SIZE 32
+#define CACHE_BLOCK_SIZE 16
 
 __global__ void sgemm_caching(
     int M,
