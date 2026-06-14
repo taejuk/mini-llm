@@ -16,6 +16,7 @@ add_compile_definitions(WEIGHTS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/weights")
 # kernels 라이브러리 생성
 add_library(mini_llm_kernels
     src/kernels/gemm.cu
+    src/kernels/linear.cu
     src/kernels/embedding.cu
     src/kernels/layernorm.cu
     src/kernels/residual.cu
@@ -90,6 +91,22 @@ function(add_kernel_test name src)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+function(add_model_test name src)
+    add_executable(${name} ${src})
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+    )
+    target_compile_definitions(${name} PRIVATE
+        MODEL_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/model"
+    )
+    target_link_libraries(${name} PRIVATE
+        mini_llm_model
+        CUDA::cudart
+    )
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
 add_kernel_test(test_residual tests/cpp/test_residual.cu)
 add_kernel_test(test_gelu tests/cpp/test_gelu.cu)
 add_kernel_test(test_layernorm tests/cpp/test_layernorm.cu)
@@ -97,3 +114,5 @@ add_kernel_test(test_gemm tests/cpp/test_gemm.cu)
 add_kernel_test(test_embedding tests/cpp/test_embedding.cu)
 add_kernel_test(test_append_kv tests/cpp/test_append_kv.cu)
 add_kernel_test(test_flashattention tests/cpp/test_flashattention.cu)
+
+add_model_test(test_gpt2_prefill_logits tests/cpp/test_gpt2_prefill_logits.cu)
