@@ -98,6 +98,13 @@ public:
     std::vector<float> prefill_logits_for_test(
         std::vector<std::unique_ptr<Rt::Request>>& reqs
     );
+
+    // Test/debug helper: run the normal decode path and return the one-step
+    // logits copied from the model-owned host buffer. The caller must prepare
+    // KV cache state exactly as decode() expects.
+    std::vector<float> decode_logits_for_test(
+        std::vector<std::unique_ptr<Rt::Request>>& reqs
+    );
 };
 
 } // namespace mini_llm::model
