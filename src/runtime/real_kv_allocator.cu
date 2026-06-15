@@ -61,7 +61,7 @@ bool RealKvAllocator::swap_out(Request& req) {
     // swap out할만큼 block이 충분한지 확인한다.
     int needed_cpu_blocks = req->layer_kv[0].block_table_.size() * mini_llm::constants::GPT2_N_LAYERS;
 
-    if(needed_cpu_blocks < block_manager_.free_cpu_blocks_num()) return false;
+    if(needed_cpu_blocks > block_manager_.free_cpu_blocks_num()) return false;
     std::vector<int> allocated_cpu_blocks = block_manager_.allocate_cpu(needed_cpu_blocks);
     std::vector<SwappedBlock> swapped_blocks;
     int idx = 0;
@@ -87,10 +87,13 @@ bool RealKvAllocator::swap_out(Request& req) {
 bool RealKvAllocator::swap_in(Request& req) {
     SwappedRequest swapped_req = swapped_requests_[req->request_id];
     int blocks_per_layer = swapped_req.blocks_per_layer;
+    // gpu에 공간이 있는지 확인해야 한다.
+    if(!block_manager_.can_allocate(blocks_per_layer * mini_llm::constants::GPT2_N_LAYERS)) return false;
     for(int i = 0; i < mini_llm::constants::GPT2_N_LAYERS; i++) {
         vector<int> block_tables;
         for(int j = 0; j < blocks_per_layer) {
             // gpu block 할당받고
+            // 
         }
     }
 }
