@@ -97,6 +97,7 @@ public:
 
     void free_cpu(const std::vector<int>& cpu_block_ids);
 
+    void move_data(int block_id, int cpu_block_id, bool is_move_gpu_to_cpu);
 };
 
 } // namespace mini_llm::runtime

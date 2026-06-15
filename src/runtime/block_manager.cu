@@ -1,4 +1,5 @@
 #include "runtime/block_manager.h"
+#include <cuda_runtime.h>
 
 namespace mini_llm::runtime {
 
@@ -19,7 +20,7 @@ PhysicalBlock& BlockManager::block(int block_id) {
     return blocks_[block_id];
 }
 
-const BlockManager::PhysicalBlock& block(int block_id) const {
+const PhysicalBlock& BlockManager::block(int block_id) const {
     assert(block_id >= 0 && block_id < total_blocks_);
     return blocks_[block_id];
 }
@@ -138,6 +139,14 @@ void BlockManager::free_cpu_one(int cpu_block_id) {
 
 void BlockManager::free_cpu(const std::vector<int>& cpu_block_ids) {
     for(int id : cpu_block_ids) free_cpu_one(id);
+}
+
+void BlockManager::move_data(int block_id, int cpu_block_id,bool is_move_gpu_to_cpu) {
+    float* gpu_addr = pool_.block_ptr(block_id);
+    float* cpu_addr = cpu_pool_.block_ptr(cpu_block_id);
+    size_t size = pool_.block_slot_size() * sizeof(float);
+    if(!is_move_gpu_to_cpu) cudaMemcpy(gpu_addr, cpu_addr, size, cudaMemcpyHostToDevice);
+    else cudaMemcpy(cpu_addr, gpu_addr, size, cudaMemcpyDeviceToHost);
 }
 
 

@@ -58,15 +58,45 @@ void RealKvAllocator::free_request(Request& req) override {
 }
 
 bool RealKvAllocator::swap_out(Request& req) {
+    // swap out할만큼 block이 충분한지 확인한다.
+    int needed_cpu_blocks = req->layer_kv[0].block_table_.size() * mini_llm::constants::GPT2_N_LAYERS;
 
+    if(needed_cpu_blocks < block_manager_.free_cpu_blocks_num()) return false;
+    std::vector<int> allocated_cpu_blocks = block_manager_.allocate_cpu(needed_cpu_blocks);
+    std::vector<SwappedBlock> swapped_blocks;
+    int idx = 0;
+    for(int i = 0; i < mini_llm::constants::GPT2_N_LAYERS; i++) {
+        for(int gpu_block_id : req->layer_kv[i].block_table_) {
+            int cpu_block_id = allocated_cpu_blocks[idx];
+            block_manager_.move_data(gpu_block_id, cpu_block_id, true);
+            swapped_blocks.emplace_back(cpu_block_id, block_manager_.block(gpu_block_id).filled);
+            idx++;
+        }
+    }
+
+    SwappedRequest swapped_req = SwappedRequest{
+        swapped_blocks, req->layer_kv[0].size()
+    };
+    swapped_requests_[req->request_id] = swapped_req;
+    // 나중에 request 상태를 업데이트한다. 
+    free_request(req);
+    req->kv_residency = KvCacheResidency::Cpu;
+    return true;
 }
 
 bool RealKvAllocator::swap_in(Request& req) {
-
+    SwappedRequest swapped_req = swapped_requests_[req->request_id];
+    int blocks_per_layer = swapped_req.blocks_per_layer;
+    for(int i = 0; i < mini_llm::constants::GPT2_N_LAYERS; i++) {
+        vector<int> block_tables;
+        for(int j = 0; j < blocks_per_layer) {
+            // gpu block 할당받고
+        }
+    }
 }
 
 bool RealKvAllocator::is_swapped(const Request& req) const {
-
+    
 }
 
 }

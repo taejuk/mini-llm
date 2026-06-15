@@ -1,4 +1,6 @@
+#pragma once
 
+#include <vector>
 
 namespace mini_llm::runtime {
 struct SwappedBlock {
@@ -9,7 +11,6 @@ struct SwappedBlock {
 struct SwappedRequest {
     std::vector<SwappedBlock> cpu_blocks; // layer-major order
     int blocks_per_layer = 0;
-    int num_tokens = 0;
 };
 
 }
