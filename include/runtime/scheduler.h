@@ -31,6 +31,8 @@ private:
     std::deque<std::unique_ptr<Request>> deferred_prefill_queue_;
     std::deque<std::unique_ptr<Request>> deferred_decode_queue_;
     std::deque<std::unique_ptr<Request>> cancel_queue_;
+    std::deque<std::unique_ptr<Request>> swap_out_queue_;
+
     std::atomic<bool> running_{false};
     std::thread worker_;
     InferenceBackend& backend_;
@@ -65,12 +67,13 @@ private:
     bool try_admit_decode(std::unique_ptr<Request>& req);
 
     void drain_new_requests();
-    void admit_waiting_prefill();
-    void retry_deferred_prefill();
-    void retry_deferred_decode();
-    void run_decode_batch();
-    void run_prefill_batch();
+    bool admit_waiting_prefill();
+    bool retry_deferred_prefill();
+    bool retry_deferred_decode();
+    bool run_decode_batch();
+    bool run_prefill_batch();
     bool no_internal_work();
+    bool try_swap_out_victim();
     void wait_and_enqueue_one_request();
 };
 }

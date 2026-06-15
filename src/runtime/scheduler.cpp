@@ -43,14 +43,16 @@ void Scheduler::drain_new_requests() {
     return;
 }
 
-void Scheduler::admit_waiting_prefill() {
+bool Scheduler::admit_waiting_prefill() {
+    // swap_out_queue가 있으면 우선으로 처리한다.
     int n = waiting_prefill_queue_.size();
-
+    bool progress = false;
     for (int i = 0; i < n; i++) {
         auto req = std::move(waiting_prefill_queue_.front());
         waiting_prefill_queue_.pop_front();
 
         if (try_admit_prefill(req)) {
+            progress = true;
             req->state = RequestState::PrefillRunning;
             prefill_queue_.push_back(std::move(req));
         } else {
@@ -59,36 +61,46 @@ void Scheduler::admit_waiting_prefill() {
             break; // FCFS 유지
         }
     }
+    return progress;
 }
 
-void Scheduler::retry_deferred_prefill() {
+bool Scheduler::retry_deferred_prefill() {
     // prefill이 가능한 queue에 넣는다.
     // 이 때 우선순위로 넣어야 하니깐 queue의 앞에 넣는다.
     int n = deferred_prefill_queue_.size();
+    bool progress = false;
     for(int i = 0; i < n; i++) {
         auto req = std::move(deferred_prefill_queue_.front());
         deferred_prefill_queue_.pop_front();
 
-        if (try_admit_prefill(req)) prefill_queue_.push_front(std::move(req));
+        if (try_admit_prefill(req)) {
+            prefill_queue_.push_front(std::move(req));
+            progress = true;
+        }
         else {
             deferred_prefill_queue_.push_back(std::move(req));
         } 
     }
+    return progress;
 }
 
-void Scheduler::retry_deferred_decode() {
+bool Scheduler::retry_deferred_decode() {
     int n = deferred_decode_queue_.size();
-    for(int i = 0; i < n; i++) {
+
+    for (int i = 0; i < n; i++) {
         auto req = std::move(deferred_decode_queue_.front());
         deferred_decode_queue_.pop_front();
-        if(try_admit_decode(req)) decode_queue_.push_front(std::move(req));
-        else deferred_decode_queue_.push_back(std::move(req));
+
+        req->state = RequestState::DecodeReady;
+        decode_queue_.push_back(std::move(req));
     }
+
+    return false;
 }
 
-void Scheduler::run_decode_batch() {
+bool Scheduler::run_decode_batch() {
     bool has_resp = false;
-
+    bool progress = false;
     int remaining = static_cast<int>(decode_queue_.size());
     std::deque<std::unique_ptr<Request>> next_decode_queue;
 
@@ -104,6 +116,7 @@ void Scheduler::run_decode_batch() {
             if (try_admit_decode(req)) {
                 req->state = RequestState::DecodeRunning;
                 batch.push_back(std::move(req));
+                progress = true;
             } else {
                 req->state = RequestState::DeferredDecodeKV;
                 deferred_decode_queue_.push_back(std::move(req));
@@ -170,13 +183,14 @@ void Scheduler::run_decode_batch() {
     if (has_resp && response_async_ != nullptr) {
         uv_async_send(response_async_);
     }
+    return progress;
 }
 
 
 
-void Scheduler::run_prefill_batch() {
+bool Scheduler::run_prefill_batch() {
     bool has_resp = false;
-
+    bool progress = false;
     while (!prefill_queue_.empty()) {
         std::vector<std::unique_ptr<Request>> batch;
 
@@ -194,7 +208,7 @@ void Scheduler::run_prefill_batch() {
         }
 
         std::vector<Response> responses = backend_.prefill(batch);
-
+        progress = true;
         for (size_t i = 0; i < batch.size(); i++) {
             auto req = std::move(batch[i]);
 
@@ -237,6 +251,7 @@ void Scheduler::run_prefill_batch() {
     if (has_resp && response_async_ != nullptr) {
         uv_async_send(response_async_);
     }
+    return progress;
 }
 
 
@@ -258,19 +273,28 @@ void Scheduler::wait_and_enqueue_one_request() {
     waiting_prefill_queue_.push_back(std::move(req));
 }
 
+bool Scheduler::try_swap_out_victim() {
+
+}
+
 // 여기에 로직이 담겨져 있어야 한다.
 void Scheduler::worker_loop() {
     // 여기서 model을 가지고 와야 한다.
     while (running_.load()) {
+        bool is_progress = false;
         drain_new_requests();
 
         retry_deferred_decode();
-        retry_deferred_prefill();
+        is_progress |= retry_deferred_prefill();
 
-        admit_waiting_prefill();
+        is_progress |= admit_waiting_prefill();
 
-        run_decode_batch();
-        run_prefill_batch();
+        is_progress |= run_decode_batch();
+        is_progress |= run_prefill_batch();
+
+        if (!is_progress && !no_internal_work()) {
+            is_progress |= try_swap_out_victim();
+        }
 
         if(no_internal_work()) wait_and_enqueue_one_request();    
         
