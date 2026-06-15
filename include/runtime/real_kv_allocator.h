@@ -17,12 +17,20 @@ private:
     CpuPool& cpu_pool_;
     BlockManager& block_manager_;
     std::unordered_map<uint64_t, SwappedRequest> swapped_requests_;
+
 public:
     RealKvAllocator()
         : pool_(Pool::getInstance(mini_llm::constants::DEFAULT_TOTAL_KV_BLOCKS)),
           cpu_pool_(CpuPool::getInstance(mini_llm::constants::DEFAULT_TOTAL_CPU_BLOCKS)),
           block_manager_(BlockManager::getInstance(pool_, cpu_pool_)) {}
 
+    bool allocate_prefill(Request& req) override;
+    bool allocate_decode(Request& req) override;
+    void free_request(Request& req) override;
+
+    bool swap_out(Request& req) override;
+    bool swap_in(Request& req) override;
+    bool is_swapped(const Request& req) const override;
 };
 
 } // namespace mini_llm::runtime
