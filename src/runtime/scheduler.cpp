@@ -1,6 +1,9 @@
 #include "runtime/scheduler.h"
 #include "runtime/block.h"
 
+#include <utility>
+#include <vector>
+
 namespace mini_llm::runtime {
 
 namespace C = mini_llm::constants;
@@ -14,20 +17,19 @@ void Scheduler::start() {
     worker_ = std::thread([this] {
         worker_loop();
     });
-    
 }
 
 void Scheduler::stop() {
     running_.store(false);
     request_queue_.close();
-    if(worker_.joinable()) worker_.join();
-    
+    if (worker_.joinable()) {
+        worker_.join();
+    }
 }
 
 bool Scheduler::try_admit_prefill(std::unique_ptr<Request>& req) {
     return kv_allocator_.allocate_prefill(*req);
 }
-
 
 bool Scheduler::try_admit_decode(std::unique_ptr<Request>& req) {
     return kv_allocator_.allocate_decode(*req);
@@ -36,66 +38,86 @@ bool Scheduler::try_admit_decode(std::unique_ptr<Request>& req) {
 void Scheduler::drain_new_requests() {
     std::unique_ptr<Request> req;
     int nums = 0;
-    while(nums < C::MAX_BATCH_NUM && request_queue_.try_pop(req)) {
+    while (nums < C::MAX_BATCH_NUM && request_queue_.try_pop(req)) {
         waiting_prefill_queue_.push_back(std::move(req));
         nums++;
     }
-    return;
 }
 
 bool Scheduler::admit_waiting_prefill() {
-    // swap_out_queue가 있으면 우선으로 처리한다.
-    int n = waiting_prefill_queue_.size();
+    int n = static_cast<int>(waiting_prefill_queue_.size());
     bool progress = false;
+
     for (int i = 0; i < n; i++) {
         auto req = std::move(waiting_prefill_queue_.front());
         waiting_prefill_queue_.pop_front();
 
         if (try_admit_prefill(req)) {
-            progress = true;
             req->state = RequestState::PrefillRunning;
             prefill_queue_.push_back(std::move(req));
+            progress = true;
         } else {
             req->state = RequestState::DeferredPrefillKV;
             deferred_prefill_queue_.push_back(std::move(req));
-            break; // FCFS 유지
+            break;
         }
     }
+
     return progress;
 }
 
 bool Scheduler::retry_deferred_prefill() {
-    // prefill이 가능한 queue에 넣는다.
-    // 이 때 우선순위로 넣어야 하니깐 queue의 앞에 넣는다.
-    int n = deferred_prefill_queue_.size();
+    int n = static_cast<int>(deferred_prefill_queue_.size());
     bool progress = false;
-    for(int i = 0; i < n; i++) {
+
+    for (int i = 0; i < n; i++) {
         auto req = std::move(deferred_prefill_queue_.front());
         deferred_prefill_queue_.pop_front();
 
         if (try_admit_prefill(req)) {
+            req->state = RequestState::PrefillRunning;
             prefill_queue_.push_front(std::move(req));
             progress = true;
-        }
-        else {
+        } else {
             deferred_prefill_queue_.push_back(std::move(req));
-        } 
+        }
     }
+
     return progress;
 }
 
 bool Scheduler::retry_deferred_decode() {
-    int n = deferred_decode_queue_.size();
+    int n = static_cast<int>(deferred_decode_queue_.size());
 
     for (int i = 0; i < n; i++) {
         auto req = std::move(deferred_decode_queue_.front());
         deferred_decode_queue_.pop_front();
-
         req->state = RequestState::DecodeReady;
         decode_queue_.push_back(std::move(req));
     }
 
     return false;
+}
+
+bool Scheduler::retry_swap_in_requests() {
+    int n = static_cast<int>(swap_out_queue_.size());
+    bool progress = false;
+
+    for (int i = 0; i < n; i++) {
+        auto req = std::move(swap_out_queue_.front());
+        swap_out_queue_.pop_front();
+
+        if (kv_allocator_.swap_in(*req)) {
+            req->state = RequestState::DecodeReady;
+            decode_queue_.push_back(std::move(req));
+            progress = true;
+        } else {
+            req->state = RequestState::SwappedOut;
+            swap_out_queue_.push_back(std::move(req));
+        }
+    }
+
+    return progress;
 }
 
 bool Scheduler::run_decode_batch() {
@@ -107,8 +129,7 @@ bool Scheduler::run_decode_batch() {
     while (remaining > 0) {
         std::vector<std::unique_ptr<Request>> batch;
 
-        while (remaining > 0 &&
-               static_cast<int>(batch.size()) < C::MAX_BATCH_NUM) {
+        while (remaining > 0 && static_cast<int>(batch.size()) < C::MAX_BATCH_NUM) {
             auto req = std::move(decode_queue_.front());
             decode_queue_.pop_front();
             remaining--;
@@ -116,7 +137,6 @@ bool Scheduler::run_decode_batch() {
             if (try_admit_decode(req)) {
                 req->state = RequestState::DecodeRunning;
                 batch.push_back(std::move(req));
-                progress = true;
             } else {
                 req->state = RequestState::DeferredDecodeKV;
                 deferred_decode_queue_.push_back(std::move(req));
@@ -127,9 +147,8 @@ bool Scheduler::run_decode_batch() {
             continue;
         }
 
-        
         std::vector<Response> responses = backend_.decode(batch);
-
+        progress = true;
 
         if (responses.size() != batch.size()) {
             std::cerr << "Scheduler: decode response size mismatch. "
@@ -144,12 +163,9 @@ bool Scheduler::run_decode_batch() {
             if (i < responses.size()) {
                 resp = responses[i];
             } else {
-                // decode가 아직 미완성이라면 여기로 들어올 수 있음
                 resp = Response(req->request_id, -1, true);
             }
 
-            // decode는 마지막 input token의 KV를 cache에 저장한 뒤
-            // 다음 token을 response로 만든다고 보면 됨
             for (auto& kv : req->layer_kv) {
                 kv.increment_tokens(1);
             }
@@ -165,7 +181,6 @@ bool Scheduler::run_decode_batch() {
 
             if (resp.finished) {
                 kv_allocator_.free_request(*req);
-
                 req->state = RequestState::Finished;
                 finish_queue_.push_back(std::move(req));
             } else {
@@ -183,22 +198,20 @@ bool Scheduler::run_decode_batch() {
     if (has_resp && response_async_ != nullptr) {
         uv_async_send(response_async_);
     }
+
     return progress;
 }
-
-
 
 bool Scheduler::run_prefill_batch() {
     bool has_resp = false;
     bool progress = false;
+
     while (!prefill_queue_.empty()) {
         std::vector<std::unique_ptr<Request>> batch;
 
-        while (!prefill_queue_.empty() &&
-               static_cast<int>(batch.size()) < C::MAX_BATCH_NUM) {
+        while (!prefill_queue_.empty() && static_cast<int>(batch.size()) < C::MAX_BATCH_NUM) {
             auto req = std::move(prefill_queue_.front());
             prefill_queue_.pop_front();
-
             req->state = RequestState::PrefillRunning;
             batch.push_back(std::move(req));
         }
@@ -209,6 +222,7 @@ bool Scheduler::run_prefill_batch() {
 
         std::vector<Response> responses = backend_.prefill(batch);
         progress = true;
+
         for (size_t i = 0; i < batch.size(); i++) {
             auto req = std::move(batch[i]);
 
@@ -219,15 +233,12 @@ bool Scheduler::run_prefill_batch() {
                 resp = Response(req->request_id, -1, true);
             }
 
-            // prefill은 prompt KV만 cache에 들어간 상태
             for (auto& kv : req->layer_kv) {
                 kv.set_num_tokens(req->prompts_len);
             }
 
-            // model이 뽑은 첫 output token은 request tokens에 추가
             req->tokens.push_back(resp.token);
 
-            // max_new_tokens 기준 finish는 scheduler가 최종 판단
             if (req->isfinish()) {
                 resp.finished = true;
             }
@@ -236,9 +247,7 @@ bool Scheduler::run_prefill_batch() {
             has_resp = true;
 
             if (resp.finished) {
-                
                 kv_allocator_.free_request(*req);
-
                 req->state = RequestState::Finished;
                 finish_queue_.push_back(std::move(req));
             } else {
@@ -251,9 +260,9 @@ bool Scheduler::run_prefill_batch() {
     if (has_resp && response_async_ != nullptr) {
         uv_async_send(response_async_);
     }
+
     return progress;
 }
-
 
 bool Scheduler::no_internal_work() {
     return waiting_prefill_queue_.empty()
@@ -261,6 +270,7 @@ bool Scheduler::no_internal_work() {
         && decode_queue_.empty()
         && deferred_prefill_queue_.empty()
         && deferred_decode_queue_.empty()
+        && swap_out_queue_.empty()
         && cancel_queue_.empty();
 }
 
@@ -274,31 +284,75 @@ void Scheduler::wait_and_enqueue_one_request() {
 }
 
 bool Scheduler::try_swap_out_victim() {
+    auto try_from = [this](std::deque<std::unique_ptr<Request>>& queue) -> bool {
+        for (auto it = queue.begin(); it != queue.end(); ++it) {
+            if ((*it)->kv_residency != KvCacheResidency::Gpu) {
+                continue;
+            }
+            if (kv_allocator_.is_swapped(**it)) {
+                continue;
+            }
 
+            auto req = std::move(*it);
+            queue.erase(it);
+            RequestState old_state = req->state;
+
+            if (!kv_allocator_.swap_out(*req)) {
+                req->state = old_state;
+                queue.push_back(std::move(req));
+                return false;
+            }
+
+            req->state = RequestState::SwappedOut;
+            swap_out_queue_.push_back(std::move(req));
+            admission_paused_ = true;
+            return true;
+        }
+        return false;
+    };
+
+    if (try_from(deferred_decode_queue_)) {
+        return true;
+    }
+
+    return try_from(decode_queue_);
 }
 
-// 여기에 로직이 담겨져 있어야 한다.
 void Scheduler::worker_loop() {
-    // 여기서 model을 가지고 와야 한다.
     while (running_.load()) {
         bool is_progress = false;
-        drain_new_requests();
+
+        if (!admission_paused_) {
+            drain_new_requests();
+        }
+
+        is_progress |= retry_swap_in_requests();
 
         retry_deferred_decode();
-        is_progress |= retry_deferred_prefill();
-
-        is_progress |= admit_waiting_prefill();
-
         is_progress |= run_decode_batch();
+
+        is_progress |= retry_swap_in_requests();
+
+        is_progress |= retry_deferred_prefill();
+        is_progress |= admit_waiting_prefill();
         is_progress |= run_prefill_batch();
+
+        is_progress |= retry_swap_in_requests();
 
         if (!is_progress && !no_internal_work()) {
             is_progress |= try_swap_out_victim();
         }
 
-        if(no_internal_work()) wait_and_enqueue_one_request();    
-        
+        if (admission_paused_ && no_internal_work()) {
+            admission_paused_ = false;
+        }
+
+        if (no_internal_work()) {
+            wait_and_enqueue_one_request();
+        } else if (!is_progress) {
+            std::this_thread::yield();
+        }
     }
-    // 여기서 호출하면 된다.
 }
-}
+
+} // namespace mini_llm::runtime
