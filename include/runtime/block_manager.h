@@ -8,7 +8,6 @@
 #include "runtime/pool.cuh"
 #include "runtime/cpu_pool.cuh"
 
-
 namespace mini_llm::runtime {
 
 class BlockManager {
@@ -29,17 +28,15 @@ private:
     std::vector<int> free_cpu_block_ids_;
     std::vector<bool> is_cpu_free_;
 
-    
     explicit BlockManager(Pool& pool, CpuPool& cpu_pool)
         : pool_(pool),
+          cpu_pool_(cpu_pool),
           total_blocks_(pool.total_blocks()),
           free_blocks_(pool.total_blocks()),
-          is_free_(pool.total_blocks(), true),
-          cpu_pool_(cpu_pool),
           total_cpu_blocks_(cpu_pool.total_blocks()),
           free_cpu_blocks_(cpu_pool.total_blocks()),
-          is_cpu_free_(cpu_pool_.total_blocks(), true)
-           {
+          is_free_(pool.total_blocks(), true),
+          is_cpu_free_(cpu_pool.total_blocks(), true) {
         blocks_.reserve(total_blocks_);
         free_block_ids_.reserve(total_blocks_);
 
@@ -49,8 +46,9 @@ private:
         }
 
         free_cpu_block_ids_.reserve(total_cpu_blocks_);
-        for(int i = 0; i < total_cpu_blocks_; i++) free_cpu_block_ids_.push_back(i);
-
+        for (int i = 0; i < total_cpu_blocks_; i++) {
+            free_cpu_block_ids_.push_back(i);
+        }
     }
 
 public:
@@ -62,7 +60,7 @@ public:
     BlockManager(const BlockManager&) = delete;
     BlockManager& operator=(const BlockManager&) = delete;
 
-    // --- GPU Pool 관련 method들 ---
+    // --- GPU Pool related methods ---
     bool can_allocate(int n) const;
 
     int free_blocks_num() const;
@@ -85,8 +83,7 @@ public:
 
     Pool& pool();
 
-    // --- CPU pool 관련 메소드들 ---
-
+    // --- CPU Pool related methods ---
     int free_cpu_blocks_num() const;
 
     int allocate_cpu_one();
@@ -97,7 +94,7 @@ public:
 
     void free_cpu(const std::vector<int>& cpu_block_ids);
 
-    void move_data(int block_id, int cpu_block_id, bool is_move_gpu_to_cpu);
+    bool move_data(int block_id, int cpu_block_id, bool is_move_gpu_to_cpu);
 };
 
 } // namespace mini_llm::runtime
