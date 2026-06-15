@@ -85,6 +85,7 @@ if(NEED_CUDA)
 endif()
 
 if(BUILD_RUNTIME)
+    enable_testing()
     find_path(UV_INCLUDE_DIR uv.h)
     find_library(UV_LIBRARY uv)
 
@@ -99,6 +100,7 @@ if(BUILD_RUNTIME)
     add_library(mini_llm_runtime
         src/runtime/scheduler.cpp
         src/runtime/server.cpp
+        src/runtime/block_manager.cpp
     )
 
     target_include_directories(mini_llm_runtime PUBLIC
@@ -137,6 +139,26 @@ if(BUILD_RUNTIME)
     target_link_libraries(mini_llm PRIVATE
         mini_llm_runtime
     )
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/test_scheduler.cpp")
+        add_executable(test_scheduler
+            tests/cpp/test_scheduler.cpp
+        )
+
+        target_include_directories(test_scheduler PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+            ${UV_INCLUDE_DIR}
+        )
+
+        target_link_libraries(test_scheduler PRIVATE
+            mini_llm_runtime
+            Threads::Threads
+            ${UV_LIBRARY}
+        )
+
+        add_test(NAME test_scheduler COMMAND test_scheduler)
+    endif()
 endif()
 
 if(BUILD_CUDA_TESTS)

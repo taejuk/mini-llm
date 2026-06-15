@@ -25,6 +25,16 @@ enum class RequestState {
     Aborted
 };
 
+enum class KvCacheResidency {
+    None,
+    Gpu,
+    Cpu,
+    Mixed   // 일부는 GPU, 일부는 CPU
+};
+
+
+
+
 struct Request {
     uint64_t request_id = static_cast<uint64_t>(-1);
     std::vector<int> tokens;
@@ -34,7 +44,8 @@ struct Request {
 
     int max_new_tokens = 8;
     RequestState state = RequestState::WaitingPrefill;
-
+    KvCacheResidency kv_residency = KvCacheResidency::None;
+    
     int* d_block_tables_ = nullptr;
     size_t offset = 0;
 

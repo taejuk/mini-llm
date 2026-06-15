@@ -3,27 +3,43 @@
 #include <vector>
 #include <cassert>
 #include <iostream>
-
+#include <unordered_map>
 #include "runtime/block.h"
 #include "runtime/pool.cuh"
+#include "runtime/cpu_pool.cuh"
+
 
 namespace mini_llm::runtime {
 
 class BlockManager {
 private:
     Pool& pool_;
+    CpuPool& cpu_pool_;
+
     int total_blocks_;
     int free_blocks_;
+
+    int total_cpu_blocks_;
+    int free_cpu_blocks_;
 
     std::vector<PhysicalBlock> blocks_;
     std::vector<int> free_block_ids_;
     std::vector<bool> is_free_;
 
-    explicit BlockManager(Pool& pool)
+    std::vector<int> free_cpu_block_ids_;
+    std::vector<bool> is_cpu_free_;
+
+    
+    explicit BlockManager(Pool& pool, CpuPool& cpu_pool)
         : pool_(pool),
           total_blocks_(pool.total_blocks()),
           free_blocks_(pool.total_blocks()),
-          is_free_(pool.total_blocks(), true) {
+          is_free_(pool.total_blocks(), true),
+          cpu_pool_(cpu_pool),
+          total_cpu_blocks_(cpu_pool.total_blocks()),
+          free_cpu_blocks_(cpu_pool.total_blocks()),
+          is_cpu_free_(cpu_pool_.total_blocks(), true)
+           {
         blocks_.reserve(total_blocks_);
         free_block_ids_.reserve(total_blocks_);
 
@@ -31,110 +47,56 @@ private:
             blocks_.emplace_back(i);
             free_block_ids_.push_back(i);
         }
+
+        free_cpu_block_ids_.reserve(total_cpu_blocks_);
+        for(int i = 0; i < total_cpu_blocks_; i++) free_cpu_block_ids_.push_back(i);
+
     }
 
 public:
-    static BlockManager& getInstance(Pool& pool) {
-        static BlockManager instance(pool);
+    static BlockManager& getInstance(Pool& pool, CpuPool& cpu_pool) {
+        static BlockManager instance(pool, cpu_pool);
         return instance;
     }
 
     BlockManager(const BlockManager&) = delete;
     BlockManager& operator=(const BlockManager&) = delete;
 
-    bool can_allocate(int n) const {
-        return n >= 0 && free_blocks_ >= n;
-    }
+    // --- GPU Pool 관련 method들 ---
+    bool can_allocate(int n) const;
 
-    int free_blocks_num() const {
-        return free_blocks_;
-    }
+    int free_blocks_num() const;
 
-    int total_blocks() const {
-        return total_blocks_;
-    }
+    int total_blocks() const;
 
-    int allocate_one() {
-        if (free_block_ids_.empty()) {
-            return -1;
-        }
+    int allocate_one();
 
-        int block_id = free_block_ids_.back();
-        free_block_ids_.pop_back();
+    std::vector<int> allocate(int n);
 
-        assert(block_id >= 0 && block_id < total_blocks_);
-        assert(is_free_[block_id]);
+    void free_one(int block_id);
 
-        is_free_[block_id] = false;
-        free_blocks_--;
+    void free(const std::vector<int>& block_ids);
 
-        blocks_[block_id].reset();
+    PhysicalBlock& block(int block_id);
 
-        return block_id;
-    }
+    const PhysicalBlock& block(int block_id) const;
 
-    std::vector<int> allocate(int n) {
-        std::vector<int> ret;
+    float* block_ptr(int block_id);
 
-        if (!can_allocate(n)) {
-            return ret;
-        }
+    Pool& pool();
 
-        ret.reserve(n);
+    // --- CPU pool 관련 메소드들 ---
 
-        for (int i = 0; i < n; i++) {
-            int block_id = allocate_one();
-            assert(block_id >= 0);
-            ret.push_back(block_id);
-        }
+    int free_cpu_blocks_num() const;
 
-        return ret;
-    }
+    int allocate_cpu_one();
 
-    void free_one(int block_id) {
-        if (block_id < 0 || block_id >= total_blocks_) {
-            std::cerr << "BlockManager: invalid block id "
-                      << block_id << "\n";
-            return;
-        }
+    std::vector<int> allocate_cpu(int n);
 
-        if (is_free_[block_id]) {
-            std::cerr << "BlockManager: double free block id "
-                      << block_id << "\n";
-            return;
-        }
+    void free_cpu_one(int cpu_block_id);
 
-        blocks_[block_id].reset();
-        is_free_[block_id] = true;
-        free_block_ids_.push_back(block_id);
-        free_blocks_++;
-    }
+    void free_cpu(const std::vector<int>& cpu_block_ids);
 
-    void free(const std::vector<int>& block_ids) {
-        for (int block_id : block_ids) {
-            free_one(block_id);
-        }
-    }
-
-    PhysicalBlock& block(int block_id) {
-        assert(block_id >= 0 && block_id < total_blocks_);
-        return blocks_[block_id];
-    }
-
-    const PhysicalBlock& block(int block_id) const {
-        assert(block_id >= 0 && block_id < total_blocks_);
-        return blocks_[block_id];
-    }
-
-    float* block_ptr(int block_id) {
-        assert(block_id >= 0 && block_id < total_blocks_);
-        assert(!is_free_[block_id]);
-        return pool_.block_ptr(block_id);
-    }
-
-    Pool& pool() {
-        return pool_;
-    }
 };
 
 } // namespace mini_llm::runtime

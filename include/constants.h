@@ -15,6 +15,8 @@ inline constexpr int DEFAULT_MAX_NEW_TOKENS = 8;
 
 inline constexpr int DEFAULT_KV_BLOCK_SIZE = 16;
 inline constexpr int DEFAULT_TOTAL_KV_BLOCKS = 4096;
+inline constexpr int DEFAULT_TOTAL_CPU_BLOCKS = 4096;
+
 
 inline constexpr int DEFAULT_MAX_DECODE_BATCH_SIZE = 8;
 inline constexpr int DEFAULT_MAX_PREFILL_PER_ITER = 1;

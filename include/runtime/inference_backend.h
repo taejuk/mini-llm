@@ -19,6 +19,8 @@ public:
     virtual std::vector<Response> decode(
         std::vector<std::unique_ptr<Request>>& reqs
     ) = 0;
+
+    
 };
 
 } // namespace mini_llm::runtime

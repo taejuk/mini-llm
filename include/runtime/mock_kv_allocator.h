@@ -49,6 +49,18 @@ public:
             kv.reset();
         }
     }
+
+    bool swap_out(Request& req) {
+        return true;
+    }
+
+    bool swap_in(Request& req) {
+        return true;
+    }
+
+    bool is_swapped(const Request& req) const {
+        return true;
+    }
 };
 
 } // namespace mini_llm::runtime
