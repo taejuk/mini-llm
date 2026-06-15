@@ -23,6 +23,8 @@ public:
             }
         }
 
+        req.kv_residency = KvCacheResidency::Gpu;
+
         return true;
     }
 
@@ -41,6 +43,8 @@ public:
             req.layer_kv[layer].append_block(next_block_id_++);
         }
 
+        req.kv_residency = KvCacheResidency::Gpu;
+
         return true;
     }
 
@@ -48,18 +52,24 @@ public:
         for (auto& kv : req.layer_kv) {
             kv.reset();
         }
+
+        req.kv_residency = KvCacheResidency::None;
     }
 
-    bool swap_out(Request& req) {
+    bool swap_out(Request& req) override {
+        req.kv_residency = KvCacheResidency::Cpu;
+        req.state = RequestState::SwappedOut;
         return true;
     }
 
-    bool swap_in(Request& req) {
+    bool swap_in(Request& req) override {
+        req.kv_residency = KvCacheResidency::Gpu;
+        req.state = RequestState::DecodeReady;
         return true;
     }
 
-    bool is_swapped(const Request& req) const {
-        return true;
+    bool is_swapped(const Request& req) const override {
+        return req.kv_residency == KvCacheResidency::Cpu;
     }
 };
 
