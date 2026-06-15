@@ -97,10 +97,20 @@ if(BUILD_RUNTIME)
         message(FATAL_ERROR "libuv not found. Install libuv or set UV_LIBRARY.")
     endif()
 
-    add_library(mini_llm_runtime
+    set(MINI_LLM_RUNTIME_SOURCES
         src/runtime/scheduler.cpp
         src/runtime/server.cpp
-        src/runtime/block_manager.cpp
+    )
+
+    if(NOT USE_MOCK_BACKEND)
+        list(APPEND MINI_LLM_RUNTIME_SOURCES
+            src/runtime/block_manager.cu
+            src/runtime/real_kv_allocator.cu
+        )
+    endif()
+
+    add_library(mini_llm_runtime
+        ${MINI_LLM_RUNTIME_SOURCES}
     )
 
     target_include_directories(mini_llm_runtime PUBLIC
