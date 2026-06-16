@@ -42,6 +42,21 @@ double percentile(std::vector<double> values, double p) {
     return values[lo] * (1.0 - frac) + values[hi] * frac;
 }
 
+// 한 번의 multi-stream 복사를 디스패치하고, 두 가지 시간을 돌려준다.
+//   wall_ms  : cudaMemcpyAsync 호출 + 최종 동기화까지 포함한 CPU wall-clock
+//              (호출 오버헤드 + 전송 시간이 섞여 있음)
+//   gpu_ms   : cudaEvent로 잰 순수 GPU 전송 구간 시간
+//              (CPU 호출 오버헤드가 빠진, 디바이스 타임라인 상의 복사 시간)
+//
+// multi-stream에서 "전체 복사 구간"을 cudaEvent로 재는 방법:
+//   1) start 이벤트를 stream[0]에 기록한다.
+//   2) 모든 copy stream이 start 이벤트를 기다리게(cudaStreamWaitEvent) 해서,
+//      모든 복사가 동일한 start 시점 이후에 시작하도록 정렬한다.
+//   3) 복사를 각 stream에 디스패치한다.
+//   4) 모든 copy stream이 stream[0]에 합류하도록, 각 stream에 마커 이벤트를
+//      찍고 stream[0]이 그 이벤트들을 기다리게 한다.
+//   5) stop 이벤트를 stream[0]에 기록한다.
+//   6) stop 이벤트까지 동기화한 뒤 start~stop 경과 시간을 읽는다.
 void copy_blocks_h2d_async(
     float* d_dst,
     float* h_src,
@@ -49,10 +64,27 @@ void copy_blocks_h2d_async(
     size_t block_elems,
     size_t block_bytes,
     std::vector<cudaStream_t>& streams,
-    int stream_count
+    int stream_count,
+    cudaEvent_t start_ev,
+    cudaEvent_t stop_ev,
+    std::vector<cudaEvent_t>& join_evs,
+    double& wall_ms,
+    double& gpu_ms
 ) {
     int active_streams = std::min(stream_count, blocks);
 
+    auto wall_start = std::chrono::high_resolution_clock::now();
+
+    // (1) start 이벤트를 stream[0]에 기록
+    CUDA_CHECK(cudaEventRecord(start_ev, streams[0]));
+
+    // (2) 모든 active stream이 start 시점 이후에 시작하도록 정렬
+    //     stream[0]은 이미 start를 기록했으므로 그 이후 작업은 자동 정렬됨.
+    for (int sid = 1; sid < active_streams; ++sid) {
+        CUDA_CHECK(cudaStreamWaitEvent(streams[sid], start_ev, 0));
+    }
+
+    // (3) 복사 디스패치 (block을 round-robin으로 stream에 분배)
     for (int b = 0; b < blocks; ++b) {
         int sid = b % active_streams;
 
@@ -68,9 +100,27 @@ void copy_blocks_h2d_async(
         ));
     }
 
-    for (int sid = 0; sid < active_streams; ++sid) {
-        CUDA_CHECK(cudaStreamSynchronize(streams[sid]));
+    // (4) 각 보조 stream이 stream[0]에 합류하도록 마커 이벤트 사용
+    for (int sid = 1; sid < active_streams; ++sid) {
+        CUDA_CHECK(cudaEventRecord(join_evs[sid], streams[sid]));
+        CUDA_CHECK(cudaStreamWaitEvent(streams[0], join_evs[sid], 0));
     }
+
+    // (5) stop 이벤트를 stream[0]에 기록 (모든 복사 완료 후 시점)
+    CUDA_CHECK(cudaEventRecord(stop_ev, streams[0]));
+
+    // (6) stop 이벤트까지 대기 후 순수 GPU 전송 시간 측정
+    CUDA_CHECK(cudaEventSynchronize(stop_ev));
+
+    auto wall_end = std::chrono::high_resolution_clock::now();
+
+    float elapsed_ms = 0.0f;
+    CUDA_CHECK(cudaEventElapsedTime(&elapsed_ms, start_ev, stop_ev));
+    gpu_ms = static_cast<double>(elapsed_ms);
+
+    wall_ms = std::chrono::duration<double, std::milli>(
+        wall_end - wall_start
+    ).count();
 }
 
 } // namespace
@@ -138,10 +188,29 @@ int main(int argc, char** argv) {
         CUDA_CHECK(cudaStreamCreate(&streams[i]));
     }
 
+    // 타이밍/합류용 이벤트.
+    // 타이밍 이벤트(start/stop)는 기본 플래그(타이밍 활성).
+    // 합류 마커 이벤트는 cudaEventDisableTiming으로 만들어 오버헤드를 줄인다.
+    cudaEvent_t start_ev;
+    cudaEvent_t stop_ev;
+    CUDA_CHECK(cudaEventCreate(&start_ev));
+    CUDA_CHECK(cudaEventCreate(&stop_ev));
+
+    std::vector<cudaEvent_t> join_evs(MAX_STREAMS);
+    for (int i = 0; i < MAX_STREAMS; ++i) {
+        CUDA_CHECK(cudaEventCreateWithFlags(
+            &join_evs[i],
+            cudaEventDisableTiming
+        ));
+    }
+
     std::cout
         << "direction,mode,blocks,requested_streams,active_streams,"
-        << "copy_calls,bytes,total_avg_ms,total_p50_ms,total_p99_ms,"
-        << "per_block_avg_us,bandwidth_GBps\n";
+        << "copy_calls,bytes,"
+        << "wall_avg_ms,wall_p50_ms,wall_p99_ms,"
+        << "gpu_avg_ms,gpu_p50_ms,gpu_p99_ms,"
+        << "call_overhead_avg_ms,"
+        << "gpu_per_block_avg_us,gpu_bandwidth_GBps\n";
 
     for (int blocks = 1; blocks <= max_blocks; blocks *= 2) {
         const size_t bytes = static_cast<size_t>(blocks) * block_bytes;
@@ -149,61 +218,66 @@ int main(int argc, char** argv) {
         for (int stream_count : STREAM_COUNTS) {
             int active_streams = std::min(stream_count, blocks);
 
+            double wall_ms = 0.0;
+            double gpu_ms = 0.0;
+
             for (int i = 0; i < warmup; ++i) {
                 copy_blocks_h2d_async(
-                    d_dst,
-                    h_src,
-                    blocks,
-                    block_elems,
-                    block_bytes,
-                    streams,
-                    stream_count
+                    d_dst, h_src, blocks, block_elems, block_bytes,
+                    streams, stream_count,
+                    start_ev, stop_ev, join_evs,
+                    wall_ms, gpu_ms
                 );
             }
 
             CUDA_CHECK(cudaDeviceSynchronize());
 
-            std::vector<double> times_ms;
-            times_ms.reserve(iterations);
+            std::vector<double> wall_times;
+            std::vector<double> gpu_times;
+            wall_times.reserve(iterations);
+            gpu_times.reserve(iterations);
 
             for (int i = 0; i < iterations; ++i) {
-                auto start = std::chrono::high_resolution_clock::now();
-
                 copy_blocks_h2d_async(
-                    d_dst,
-                    h_src,
-                    blocks,
-                    block_elems,
-                    block_bytes,
-                    streams,
-                    stream_count
+                    d_dst, h_src, blocks, block_elems, block_bytes,
+                    streams, stream_count,
+                    start_ev, stop_ev, join_evs,
+                    wall_ms, gpu_ms
                 );
 
-                auto end = std::chrono::high_resolution_clock::now();
-
-                double ms = std::chrono::duration<double, std::milli>(
-                    end - start
-                ).count();
-
-                times_ms.push_back(ms);
+                wall_times.push_back(wall_ms);
+                gpu_times.push_back(gpu_ms);
             }
 
-            double sum = std::accumulate(
-                times_ms.begin(),
-                times_ms.end(),
-                0.0
+            double wall_sum = std::accumulate(
+                wall_times.begin(), wall_times.end(), 0.0
+            );
+            double gpu_sum = std::accumulate(
+                gpu_times.begin(), gpu_times.end(), 0.0
             );
 
-            double avg_ms = sum / static_cast<double>(times_ms.size());
-            double p50_ms = percentile(times_ms, 50.0);
-            double p99_ms = percentile(times_ms, 99.0);
+            double wall_avg = wall_sum / static_cast<double>(wall_times.size());
+            double wall_p50 = percentile(wall_times, 50.0);
+            double wall_p99 = percentile(wall_times, 99.0);
 
-            double per_block_avg_us =
-                (avg_ms * 1000.0) / static_cast<double>(blocks);
+            double gpu_avg = gpu_sum / static_cast<double>(gpu_times.size());
+            double gpu_p50 = percentile(gpu_times, 50.0);
+            double gpu_p99 = percentile(gpu_times, 99.0);
+
+            // 호출 오버헤드 추정 = wall-clock 평균 - 순수 GPU 전송 평균.
+            // stream/blocks가 많을수록 이 값이 커지면, 병목이 PCIe가 아니라
+            // CPU 측 디스패치(cudaMemcpyAsync 호출 횟수)임을 뜻한다.
+            double call_overhead_avg = wall_avg - gpu_avg;
+
+            // 대역폭은 순수 GPU 전송 시간 기준으로 계산해야 PCIe 실효 대역폭에
+            // 가깝다. wall-clock 기준으로 계산하면 호출 오버헤드 때문에
+            // 대역폭이 실제보다 낮게 보인다.
+            double gpu_per_block_avg_us =
+                (gpu_avg * 1000.0) / static_cast<double>(blocks);
 
             double gb = static_cast<double>(bytes) / 1e9;
-            double sec = avg_ms / 1000.0;
-            double bandwidth_gbps = gb / sec;
+            double gpu_sec = gpu_avg / 1000.0;
+            double gpu_bandwidth_gbps = (gpu_sec > 0.0) ? (gb / gpu_sec) : 0.0;
 
             std::cout
                 << "H2D,"
@@ -213,14 +287,24 @@ int main(int argc, char** argv) {
                 << active_streams << ","
                 << blocks << ","
                 << bytes << ","
-                << avg_ms << ","
-                << p50_ms << ","
-                << p99_ms << ","
-                << per_block_avg_us << ","
-                << bandwidth_gbps
+                << wall_avg << ","
+                << wall_p50 << ","
+                << wall_p99 << ","
+                << gpu_avg << ","
+                << gpu_p50 << ","
+                << gpu_p99 << ","
+                << call_overhead_avg << ","
+                << gpu_per_block_avg_us << ","
+                << gpu_bandwidth_gbps
                 << "\n";
         }
     }
+
+    for (int i = 0; i < MAX_STREAMS; ++i) {
+        CUDA_CHECK(cudaEventDestroy(join_evs[i]));
+    }
+    CUDA_CHECK(cudaEventDestroy(start_ev));
+    CUDA_CHECK(cudaEventDestroy(stop_ev));
 
     for (int i = 0; i < MAX_STREAMS; ++i) {
         CUDA_CHECK(cudaStreamDestroy(streams[i]));
