@@ -82,6 +82,20 @@ if(NEED_CUDA)
             CUDA::cudart
         )
     endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/gpt2/bench_prefill_decode_by_len.cu")
+        add_executable(bench_prefill_decode_by_len
+            benchmarks/gpt2/bench_prefill_decode_by_len.cu
+        )
+
+        target_include_directories(bench_prefill_decode_by_len PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+
+        target_link_libraries(bench_prefill_decode_by_len PRIVATE
+            mini_llm_model
+            CUDA::cudart
+        )
+    endif()
 endif()
 
 if(BUILD_RUNTIME)
