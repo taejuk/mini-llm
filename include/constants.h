@@ -22,7 +22,7 @@ inline constexpr int DEFAULT_MAX_DECODE_BATCH_SIZE = 8;
 inline constexpr int DEFAULT_MAX_PREFILL_PER_ITER = 1;
 inline constexpr int DEFAULT_REQUEST_POOL_SIZE = 1024;
 
-inline constexpr int MAX_SEQ = 8192;
+inline constexpr int MAX_SEQ = 1024;
 inline constexpr int MAX_BATCH_NUM = 16;
 
 inline constexpr int GPT2_EOS_TOKEN_ID = 50256;

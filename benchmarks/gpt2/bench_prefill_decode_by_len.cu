@@ -234,6 +234,7 @@ int main(int argc, char** argv) {
     std::cout << "token_len,prefill_avg_ms,decode_avg_ms\n";
 
     for (int token_len = 1; token_len <= max_token_len; token_len *= 2) {
+        if(token_len == C::MAX_SEQ) token_len--;
         warmup(model, token_len, warmup_iters);
 
         double prefill_avg_ms = benchmark_prefill_avg_ms(
