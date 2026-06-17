@@ -265,5 +265,21 @@ if(BUILD_CUDA_TESTS)
 
         add_test(NAME test_real_kv_swap COMMAND test_real_kv_swap)
     endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/runtime/bench_swap_in_prefill_decode_overlap.cu")
+    add_executable(bench_swap_in_prefill_decode_overlap
+        benchmarks/runtime/bench_swap_in_prefill_decode_overlap.cu
+        src/runtime/block_manager.cu
+        src/runtime/real_kv_allocator.cu
+    )
 
+    target_include_directories(bench_swap_in_prefill_decode_overlap PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+    )
+
+    target_link_libraries(bench_swap_in_prefill_decode_overlap PRIVATE
+        mini_llm_model
+        CUDA::cudart
+    )
+    endif()
 endif()
