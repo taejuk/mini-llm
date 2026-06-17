@@ -52,6 +52,8 @@ private:
     int* d_block_table;
     int* d_token_to_block;
     int* d_token_to_offset;
+    int* d_block_offsets;
+    int* d_num_tokens;
 
     int* h_token_to_block;
     int* h_token_to_offset;

@@ -152,6 +152,8 @@ GPT2Model::GPT2Model() {
     cudaMalloc(&d_pos, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
     cudaMalloc(&d_token_to_block, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
     cudaMalloc(&d_token_to_offset, C::MAX_BATCH_NUM * C::MAX_SEQ * sizeof(int));
+    cudaMalloc(&d_block_offsets, C::MAX_BATCH_NUM * sizeof(int));
+    cudaMalloc(&d_num_tokens, C::MAX_BATCH_NUM * sizeof(int));
     h_token_to_block = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
     h_token_to_offset = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
     h_tokens = new int[C::MAX_BATCH_NUM * C::MAX_SEQ];
@@ -369,18 +371,6 @@ std::vector<Rt::Response> GPT2Model::decode(
         batch_size
     );
 
-    int* d_block_offsets = nullptr;
-    int* d_num_tokens = nullptr;
-
-    cudaMalloc(
-        &d_block_offsets,
-        batch_size * sizeof(int)
-    );
-
-    cudaMalloc(
-        &d_num_tokens,
-        batch_size * sizeof(int)
-    );
 
     for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
         Kernel::layernorm(
@@ -548,9 +538,6 @@ std::vector<Rt::Response> GPT2Model::decode(
             batch_size * C::GPT2_D_MODEL
         );
     }
-
-    cudaFree(d_block_offsets);
-    cudaFree(d_num_tokens);
 
     Kernel::layernorm(
         buf_x,
