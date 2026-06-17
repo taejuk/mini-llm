@@ -4,6 +4,7 @@
 #include <sstream>
 #include <vector>
 #include <iostream>
+#include <cstdint>
 
 #include "runtime/pagekvcache.h"
 #include "constants.h"
