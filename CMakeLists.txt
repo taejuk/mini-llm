@@ -246,4 +246,24 @@ if(BUILD_CUDA_TESTS)
 
     add_model_test(test_gpt2_prefill_logits tests/cpp/test_gpt2_prefill_logits.cu)
     add_model_test(test_gpt2_decode_logits tests/cpp/test_gpt2_decode_logits.cu)
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/test_real_kv_swap.cu")
+        add_executable(test_real_kv_swap
+            tests/cpp/test_real_kv_swap.cu
+            src/runtime/block_manager.cu
+            src/runtime/real_kv_allocator.cu
+        )
+
+        target_include_directories(test_real_kv_swap PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+        )
+
+        target_link_libraries(test_real_kv_swap PRIVATE
+            CUDA::cudart
+        )
+
+        add_test(NAME test_real_kv_swap COMMAND test_real_kv_swap)
+    endif()
+
 endif()
