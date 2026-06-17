@@ -98,6 +98,7 @@ bool Scheduler::retry_deferred_decode() {
 
     return false;
 }
+// 이거를 비동기 함수로 바꿔야 한다. swap_in을 비동기로 바꿔야 한다.
 
 bool Scheduler::retry_swap_in_requests() {
     int n = static_cast<int>(swap_out_queue_.size());
