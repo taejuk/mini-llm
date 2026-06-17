@@ -246,6 +246,7 @@ if(BUILD_CUDA_TESTS)
 
     add_model_test(test_gpt2_prefill_logits tests/cpp/test_gpt2_prefill_logits.cu)
     add_model_test(test_gpt2_decode_logits tests/cpp/test_gpt2_decode_logits.cu)
+    add_model_test(test_gpt2_batch_prefill_logits tests/cpp/test_gpt2_batch_prefill_logits.cu)
 
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp/test_real_kv_swap.cu")
         add_executable(test_real_kv_swap

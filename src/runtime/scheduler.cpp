@@ -106,7 +106,7 @@ bool Scheduler::retry_swap_in_requests() {
     for (int i = 0; i < n; i++) {
         auto req = std::move(swap_out_queue_.front());
         swap_out_queue_.pop_front();
-
+        // 
         if (kv_allocator_.swap_in(*req)) {
             req->state = RequestState::DecodeReady;
             decode_queue_.push_back(std::move(req));
