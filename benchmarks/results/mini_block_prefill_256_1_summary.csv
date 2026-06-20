@@ -1,0 +1,13 @@
+stage,total_ms,count,avg_ms,pct
+flashattention_prefill_total,130.7149,12,10.8929,35.47
+fc2,75.3113,12,6.2759,20.44
+fc1,73.8640,12,6.1553,20.05
+qkv_projection,54.1636,12,4.5136,14.70
+attn_out_projection,19.5037,12,1.6253,5.29
+gelu,5.0815,12,0.4235,1.38
+append_prefill_kv,2.6881,12,0.2240,0.73
+residual_attn,1.9744,12,0.1645,0.54
+residual_ffn,1.9538,12,0.1628,0.53
+ln1,1.3518,12,0.1126,0.37
+ln2,1.3422,12,0.1119,0.36
+make_tables_h2d,0.5370,12,0.0448,0.15

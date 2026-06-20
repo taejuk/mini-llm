@@ -1,6 +1,14 @@
 import os
-os.environ.setdefault("VLLM_USE_V1", "0")
 
+os.environ.setdefault("VLLM_USE_V1", "0")
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "ERROR")
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import logging
+logging.getLogger("vllm").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 import sys
 import time
 import torch

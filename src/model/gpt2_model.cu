@@ -15,9 +15,12 @@
 #include "runtime/pool.cuh"
 #include "runtime/block_manager.h"
 
+#include "profiling/stage_timer.cuh"
+
 #include <iostream>
 #include <cstdlib>
 #include <cstdio>
+#include <string>
 
 namespace mini_llm::model {
 namespace C = mini_llm::constants;
@@ -227,9 +230,44 @@ void GPT2Model::gather_last_tokens(
     }
 }
 
-void GPT2Model::block_prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs, int seq_len, int layer) {
-        Kernel::layernorm(buf_x, W.ln1_w[layer], W.ln1_b[layer], buf_ln, seq_len, mini_llm::constants::GPT2_D_MODEL);
-        // buf_qkv를 만들어야 한다.
+
+void GPT2Model::block_prefill(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs,
+    int seq_len,
+    int layer
+) {
+    const int batch_size = static_cast<int>(reqs.size());
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "ln1"
+        );
+
+        Kernel::layernorm(
+            buf_x,
+            W.ln1_w[layer],
+            W.ln1_b[layer],
+            buf_ln,
+            seq_len,
+            C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "qkv_projection"
+        );
+
         Kernel::qkv_projection(
             buf_ln,
             W.qkv_w[layer],
@@ -237,36 +275,206 @@ void GPT2Model::block_prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs, i
             buf_qkv,
             seq_len
         );
-        // buf_qkv를 저장하는 것은 모든 request가 같이하는게 낫다.
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "make_tables_h2d"
+        );
+
         make_tables(reqs, layer);
-        Kernel::append_prefill_kv(buf_qkv, pool, d_token_to_block, d_token_to_offset, seq_len);
-        // attention 호출
-        int before_tokens = 0;   
-        float scale = 1.0f / sqrtf(static_cast<float>(mini_llm::constants::GPT2_D_HEAD));
-        for(const auto& req: reqs) {
-            int buf_qkv_offset = before_tokens * 3 * C::GPT2_D_MODEL;
-            int buf_O_offset = before_tokens * C::GPT2_D_MODEL;
-            Kernel::flashattention_prefill(buf_qkv + buf_qkv_offset, buf_attn_out + buf_O_offset, req->prompts_len, scale);
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "append_prefill_kv"
+        );
+
+        Kernel::append_prefill_kv(
+            buf_qkv,
+            pool,
+            d_token_to_block,
+            d_token_to_offset,
+            seq_len
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "flashattention_prefill_total"
+        );
+
+        int before_tokens = 0;
+        float scale =
+            1.0f / sqrtf(static_cast<float>(C::GPT2_D_HEAD));
+
+        for (const auto& req : reqs) {
+            int buf_qkv_offset =
+                before_tokens * 3 * C::GPT2_D_MODEL;
+
+            int buf_O_offset =
+                before_tokens * C::GPT2_D_MODEL;
+
+            Kernel::flashattention_prefill(
+                buf_qkv + buf_qkv_offset,
+                buf_attn_out + buf_O_offset,
+                req->prompts_len,
+                scale
+            );
+
             before_tokens += req->prompts_len;
         }
-        // output projection을 한다.
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "attn_out_projection"
+        );
+
         Kernel::linear(
             buf_attn_out,
             W.out_w[layer],
             W.out_b[layer],
             buf_proj,
             seq_len,
-            mini_llm::constants::GPT2_D_MODEL,
-            mini_llm::constants::GPT2_D_MODEL
+            C::GPT2_D_MODEL,
+            C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "residual_attn"
         );
 
-        Kernel::residual_add(buf_x, buf_proj, (size_t)seq_len * mini_llm::constants::GPT2_D_MODEL);
-        Kernel::layernorm(buf_x, W.ln2_w[layer], W.ln2_b[layer], buf_ln ,seq_len, mini_llm::constants::GPT2_D_MODEL);
-        Kernel::linear(buf_ln, W.fc1_w[layer], W.fc1_b[layer], buf_ff, seq_len, mini_llm::constants::GPT2_D_MODEL, mini_llm::constants::GPT2_D_FF);
-        Kernel::gelu(buf_ff, seq_len * mini_llm::constants::GPT2_D_FF);
-        Kernel::linear(buf_ff, W.fc2_w[layer], W.fc2_b[layer], buf_proj, seq_len, mini_llm::constants::GPT2_D_FF, mini_llm::constants::GPT2_D_MODEL);
-        Kernel::residual_add(buf_x, buf_proj, seq_len * mini_llm::constants::GPT2_D_MODEL);
+        Kernel::residual_add(
+            buf_x,
+            buf_proj,
+            static_cast<size_t>(seq_len) * C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "ln2"
+        );
+
+        Kernel::layernorm(
+            buf_x,
+            W.ln2_w[layer],
+            W.ln2_b[layer],
+            buf_ln,
+            seq_len,
+            C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "fc1"
+        );
+
+        Kernel::linear(
+            buf_ln,
+            W.fc1_w[layer],
+            W.fc1_b[layer],
+            buf_ff,
+            seq_len,
+            C::GPT2_D_MODEL,
+            C::GPT2_D_FF
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "gelu"
+        );
+
+        Kernel::gelu(
+            buf_ff,
+            seq_len * C::GPT2_D_FF
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "fc2"
+        );
+
+        Kernel::linear(
+            buf_ff,
+            W.fc2_w[layer],
+            W.fc2_b[layer],
+            buf_proj,
+            seq_len,
+            C::GPT2_D_FF,
+            C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_BLOCK_PREFILL",
+            "block_prefill_stage",
+            batch_size,
+            static_cast<std::size_t>(seq_len),
+            layer,
+            "residual_ffn"
+        );
+
+        Kernel::residual_add(
+            buf_x,
+            buf_proj,
+            static_cast<size_t>(seq_len) * C::GPT2_D_MODEL
+        );
+    }
 }
+
 
 static std::vector<int> argmax_cpu(const float* v, int row, int col) {
     std::vector<int> result;
@@ -279,57 +487,221 @@ static std::vector<int> argmax_cpu(const float* v, int row, int col) {
     return result;
 }
 
-std::vector<Rt::Response> GPT2Model::prefill(std::vector<std::unique_ptr<Rt::Request>>& reqs) {
+
+
+std::vector<Rt::Response> GPT2Model::prefill(
+    std::vector<std::unique_ptr<Rt::Request>>& reqs
+) {
+    const int batch_size = static_cast<int>(reqs.size());
+
     size_t seq_len = 0;
 
     for (const auto& req : reqs) {
         seq_len += req->prompts_len;
     }
 
-    int pos = 0;
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "prepare_input_host"
+        );
 
-    for (const auto& req : reqs) {
-        for (int i = 0; i < req->prompts_len; i++) {
-            h_tokens[pos] = req->tokens[i];
-            h_pos[pos] = i;
-            pos++;
+        int pos = 0;
+
+        for (const auto& req : reqs) {
+            for (int i = 0; i < req->prompts_len; i++) {
+                h_tokens[pos] = req->tokens[i];
+                h_pos[pos] = i;
+                pos++;
+            }
         }
     }
 
     int size = static_cast<int>(seq_len * sizeof(int));
 
-    cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
-    // 1. embedding 호출
-    Kernel::embedding_lookup(d_tokens, d_pos, W.wte, W.wpe, buf_x, seq_len);
-    
-    // block prefill을 여기서 해야한다.
-    for(int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
-        // layer마다 block을 직접 할당한다.
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "input_h2d"
+        );
+
+        cudaMemcpy(
+            d_tokens,
+            h_tokens,
+            size,
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_pos,
+            h_pos,
+            size,
+            cudaMemcpyHostToDevice
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "embedding"
+        );
+
+        Kernel::embedding_lookup(
+            d_tokens,
+            d_pos,
+            W.wte,
+            W.wpe,
+            buf_x,
+            seq_len
+        );
+    }
+
+    for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
+        std::string stage =
+            "block_prefill_layer_" + std::to_string(layer);
+
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            layer,
+            stage.c_str()
+        );
+
         block_prefill(reqs, seq_len, layer);
     }
-    // last block을 가져와서 합쳐야 한다.
-    gather_last_tokens(reqs);
-    Kernel::layernorm(buf_x_last, W.ln_f_w, W.ln_f_b, buf_ln,reqs.size(), mini_llm::constants::GPT2_D_MODEL);
-    Kernel::launch_gemm(
-        reqs.size(),              // M = batch
-        C::GPT2_VOCAB_SIZE,       // N = vocab
-        C::GPT2_D_MODEL,          // K = hidden
-        1.0f,
-        buf_ln,                   // [B, D]
-        W.wte_t,                  // [D, V]
-        0.0f,
-        buf_logits                // [B, V]
-    );
-    cudaMemcpy(h_logits, buf_logits, mini_llm::constants::GPT2_VOCAB_SIZE * reqs.size() * sizeof(float), cudaMemcpyDeviceToHost);
-    std::vector<int> output_tokens = argmax_cpu(h_logits, reqs.size() ,mini_llm::constants::GPT2_VOCAB_SIZE);
-    std::vector<Rt::Response> result;
-    for (int i = 0; i < reqs.size(); i++) {
-        bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
-        result.emplace_back(reqs[i]->request_id, output_tokens[i], done);
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "gather_last_tokens"
+        );
+
+        gather_last_tokens(reqs);
     }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "final_layernorm"
+        );
+
+        Kernel::layernorm(
+            buf_x_last,
+            W.ln_f_w,
+            W.ln_f_b,
+            buf_ln,
+            batch_size,
+            C::GPT2_D_MODEL
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "vocab_gemm"
+        );
+
+        Kernel::launch_gemm(
+            batch_size,
+            C::GPT2_VOCAB_SIZE,
+            C::GPT2_D_MODEL,
+            1.0f,
+            buf_ln,
+            W.wte_t,
+            0.0f,
+            buf_logits
+        );
+    }
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "logits_d2h"
+        );
+
+        cudaMemcpy(
+            h_logits,
+            buf_logits,
+            C::GPT2_VOCAB_SIZE * batch_size * sizeof(float),
+            cudaMemcpyDeviceToHost
+        );
+    }
+
+    std::vector<int> output_tokens;
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "argmax_cpu"
+        );
+
+        output_tokens = argmax_cpu(
+            h_logits,
+            batch_size,
+            C::GPT2_VOCAB_SIZE
+        );
+    }
+
+    std::vector<Rt::Response> result;
+    result.reserve(reqs.size());
+
+    {
+        mini_llm::profiling::ScopedStageTimer timer(
+            "MINI_LLM_PROFILE_PREFILL",
+            "prefill_top",
+            batch_size,
+            seq_len,
+            -1,
+            "make_response"
+        );
+
+        for (int i = 0; i < batch_size; i++) {
+            bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+            result.emplace_back(
+                reqs[i]->request_id,
+                output_tokens[i],
+                done
+            );
+        }
+    }
+
     return result;
 }
+
 
 std::vector<Rt::Response> GPT2Model::decode(
     std::vector<std::unique_ptr<Rt::Request>>& reqs
