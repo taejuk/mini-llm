@@ -1,8 +1,160 @@
 #include "kernels/gemm.cuh"
 
+#include <cublas_v2.h>
+#include <cuda_runtime.h>
+
 #include <stdint.h>
+#include <cstdlib>
+#include <iostream>
 
 namespace mini_llm::kernels {
+
+
+namespace {
+
+bool use_cublas_gemm() {
+    static bool enabled =
+        std::getenv("MINI_LLM_USE_CUBLAS") != nullptr;
+    return enabled;
+}
+
+void check_cublas(cublasStatus_t status, const char* what) {
+    if (status != CUBLAS_STATUS_SUCCESS) {
+        std::cerr
+            << "[cuBLAS] "
+            << what
+            << " failed with status "
+            << static_cast<int>(status)
+            << "\n";
+        std::exit(1);
+    }
+}
+
+void check_cuda(cudaError_t status, const char* what) {
+    if (status != cudaSuccess) {
+        std::cerr
+            << "[CUDA] "
+            << what
+            << " failed: "
+            << cudaGetErrorString(status)
+            << "\n";
+        std::exit(1);
+    }
+}
+
+cublasHandle_t get_cublas_handle() {
+    static cublasHandle_t handle = [] {
+        cublasHandle_t h;
+        check_cublas(
+            cublasCreate(&h),
+            "cublasCreate"
+        );
+        return h;
+    }();
+
+    return handle;
+}
+
+__global__ void add_bias_kernel(
+    float* C,
+    const float* bias,
+    int M,
+    int N
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = M * N;
+
+    if (idx >= total) {
+        return;
+    }
+
+    int col = idx % N;
+    C[idx] += bias[col];
+}
+
+void launch_add_bias(
+    float* C,
+    const float* bias,
+    int M,
+    int N,
+    cudaStream_t stream
+) {
+    if (bias == nullptr) {
+        return;
+    }
+
+    int total = M * N;
+    int block = 256;
+    int grid = (total + block - 1) / block;
+
+    add_bias_kernel<<<grid, block, 0, stream>>>(
+        C,
+        bias,
+        M,
+        N
+    );
+}
+
+/*
+    Existing mini-llm layout:
+        A: row-major [M, K]
+        B: row-major [K, N]
+        C: row-major [M, N]
+
+    cuBLAS assumes column-major.
+
+    Row-major C = A * B is equivalent to:
+        C_col = B_col * A_col
+
+    So we call cublasSgemm as:
+        m = N
+        n = M
+        k = K
+        A = B, lda = N
+        B = A, ldb = K
+        C = C, ldc = N
+*/
+void launch_gemm_cublas_row_major(
+    int M,
+    int N,
+    int K,
+    float alpha,
+    const float* A,
+    const float* B,
+    float beta,
+    float* C,
+    cudaStream_t stream
+) {
+    cublasHandle_t handle = get_cublas_handle();
+
+    check_cublas(
+        cublasSetStream(handle, stream),
+        "cublasSetStream"
+    );
+
+    check_cublas(
+        cublasSgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            N,
+            M,
+            K,
+            &alpha,
+            B,
+            N,
+            A,
+            K,
+            &beta,
+            C,
+            N
+        ),
+        "cublasSgemm row-major"
+    );
+}
+
+} // anonymous namespace
+
 
 __device__ __forceinline__ float4 make_zero_float4() {
     return make_float4(0.0f, 0.0f, 0.0f, 0.0f);
@@ -406,6 +558,21 @@ void launch_gemm(
         return;
     }
 
+    if (use_cublas_gemm()) {
+        launch_gemm_cublas_row_major(
+            M,
+            N,
+            K,
+            alpha,
+            A,
+            B,
+            beta,
+            C,
+            stream
+        );
+        return;
+    }
+
     constexpr int numThreads = (BM / TM) * (BN / TN);
 
     dim3 grid(
@@ -427,6 +594,7 @@ void launch_gemm(
     );
 }
 
+
 void launch_gemm_bias(
     int M,
     int N,
@@ -438,6 +606,30 @@ void launch_gemm_bias(
     cudaStream_t stream
 ) {
     if (M <= 0 || N <= 0 || K <= 0) {
+        return;
+    }
+
+    if (use_cublas_gemm()) {
+        launch_gemm_cublas_row_major(
+            M,
+            N,
+            K,
+            1.0f,
+            A,
+            B,
+            0.0f,
+            C,
+            stream
+        );
+
+        launch_add_bias(
+            C,
+            bias,
+            M,
+            N,
+            stream
+        );
+
         return;
     }
 
@@ -460,5 +652,6 @@ void launch_gemm_bias(
         C
     );
 }
+
 
 } // namespace mini_llm::kernels

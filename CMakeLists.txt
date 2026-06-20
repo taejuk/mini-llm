@@ -52,6 +52,7 @@ if(NEED_CUDA)
 
     target_link_libraries(mini_llm_kernels PUBLIC
         CUDA::cudart
+        CUDA::cublas
     )
 
     add_library(mini_llm_model
