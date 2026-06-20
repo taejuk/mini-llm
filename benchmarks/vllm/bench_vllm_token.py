@@ -88,7 +88,7 @@ def main():
 
     llm = LLM(
         model="openai-community/gpt2",
-        dtype="half",
+        dtype="float",
         max_model_len=1024,
         gpu_memory_utilization=0.6,
         disable_log_stats=True,

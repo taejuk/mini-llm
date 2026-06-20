@@ -268,20 +268,34 @@ if(BUILD_CUDA_TESTS)
         add_test(NAME test_real_kv_swap COMMAND test_real_kv_swap)
     endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/runtime/bench_swap_in_prefill_decode_overlap.cu")
-    add_executable(bench_swap_in_prefill_decode_overlap
-        benchmarks/runtime/bench_swap_in_prefill_decode_overlap.cu
-        src/runtime/block_manager.cu
-        src/runtime/real_kv_allocator.cu
-    )
+        add_executable(bench_swap_in_prefill_decode_overlap
+            benchmarks/runtime/bench_swap_in_prefill_decode_overlap.cu
+            src/runtime/block_manager.cu
+            src/runtime/real_kv_allocator.cu
+        )
 
-    target_include_directories(bench_swap_in_prefill_decode_overlap PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
-    )
+        target_include_directories(bench_swap_in_prefill_decode_overlap PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/cpp
+        )
 
-    target_link_libraries(bench_swap_in_prefill_decode_overlap PRIVATE
-        mini_llm_model
-        CUDA::cudart
-    )
+        target_link_libraries(bench_swap_in_prefill_decode_overlap PRIVATE
+            mini_llm_model
+            CUDA::cudart
+        )
+    endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/gpt2/bench_batch_vs_single_wall.cu")
+        add_executable(bench_batch_vs_single_wall
+            benchmarks/gpt2/bench_batch_vs_single_wall.cu
+        )
+
+        target_include_directories(bench_batch_vs_single_wall PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+
+        target_link_libraries(bench_batch_vs_single_wall PRIVATE
+            mini_llm_model
+            CUDA::cudart
+        )
     endif()
 endif()
