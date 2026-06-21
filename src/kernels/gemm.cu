@@ -1,4 +1,5 @@
 #include "kernels/gemm.cuh"
+#include "kernels/decode_gemm.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -558,6 +559,22 @@ void launch_custom_gemm(
     float* C,
     cudaStream_t stream
 ) {
+    if (can_use_decode_gemm(M, N, K)) {
+        launch_decode_gemm(
+            M,
+            N,
+            K,
+            alpha,
+            A,
+            B,
+            beta,
+            bias,
+            C,
+            stream
+        );
+        return;
+    }
+
     dim3 grid(
         (N + BN - 1) / BN,
         (M + BM - 1) / BM
@@ -592,6 +609,7 @@ void launch_custom_gemm(
         C
     );
 }
+
 
 } // anonymous namespace
 
