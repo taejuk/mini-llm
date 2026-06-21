@@ -1,0 +1,11 @@
+batch_size,prompt_len,max_new_tokens,iterations,mode,avg_total_ms,tokens_per_sec
+1,256,8,10,sequential,76.5551,104.5
+1,256,8,10,batched,70.1476,114.045
+2,256,8,10,sequential,140.838,113.605
+2,256,8,10,batched,91.4534,174.952
+4,256,8,10,sequential,281.989,113.48
+4,256,8,10,batched,141.673,225.873
+8,256,8,10,sequential,578.306,110.668
+8,256,8,10,batched,242.536,263.879
+16,256,8,10,sequential,1169.76,109.424
+16,256,8,10,batched,464.026,275.847
