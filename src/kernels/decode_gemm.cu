@@ -1,4 +1,5 @@
 #include "kernels/decode_gemm.cuh"
+#include "constants.h"
 
 #include <cuda_runtime.h>
 
@@ -123,13 +124,40 @@ bool can_use_decode_gemm(
     }
 
     // Decode에서는 M=batch_size가 보통 1,2,4,8,16.
-    // M이 커지면 기존 prefill용 vbank/general GEMM 쪽이 더 적합함.
     if (M > 16) {
         return false;
     }
 
-    return true;
+    constexpr int D = mini_llm::constants::GPT2_D_MODEL;
+    constexpr int FF = mini_llm::constants::GPT2_D_FF;
+
+    // Apply this kernel only to GPT-2 transformer block linear layers:
+    //
+    // qkv_projection      : [B, 768]  x [768, 2304]
+    // attn_out_projection : [B, 768]  x [768, 768]
+    // fc1                 : [B, 768]  x [768, 3072]
+    // fc2                 : [B, 3072] x [3072, 768]
+    //
+    // Do NOT use this for vocab projection:
+    //     [B, 768] x [768, 50257]
+    //
+    // The vocab projection is used by logits parity tests directly, and the
+    // small-M decode kernel can introduce larger absolute differences there.
+    bool is_qkv =
+        (K == D && N == 3 * D);
+
+    bool is_attn_out =
+        (K == D && N == D);
+
+    bool is_fc1 =
+        (K == D && N == FF);
+
+    bool is_fc2 =
+        (K == FF && N == D);
+
+    return is_qkv || is_attn_out || is_fc1 || is_fc2;
 }
+
 
 void launch_decode_gemm(
     int M,
