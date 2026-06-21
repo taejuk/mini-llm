@@ -21,6 +21,16 @@ std::vector<float> GPT2Model::prefill_logits_for_test(
     std::vector<std::unique_ptr<Rt::Request>>& reqs
 ) {
     prefill(reqs);
+
+    cudaMemcpy(
+        h_logits,
+        buf_logits,
+        reqs.size() *
+            static_cast<size_t>(mini_llm::constants::GPT2_VOCAB_SIZE) *
+            sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
     return copy_host_logits(h_logits, reqs.size());
 }
 
@@ -28,6 +38,16 @@ std::vector<float> GPT2Model::decode_logits_for_test(
     std::vector<std::unique_ptr<Rt::Request>>& reqs
 ) {
     decode(reqs);
+
+    cudaMemcpy(
+        h_logits,
+        buf_logits,
+        reqs.size() *
+            static_cast<size_t>(mini_llm::constants::GPT2_VOCAB_SIZE) *
+            sizeof(float),
+        cudaMemcpyDeviceToHost
+    );
+
     return copy_host_logits(h_logits, reqs.size());
 }
 

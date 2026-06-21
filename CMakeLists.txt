@@ -49,6 +49,7 @@ message(STATUS "CMAKE_CUDA_ARCHITECTURES=${CMAKE_CUDA_ARCHITECTURES}")
         src/kernels/prefill/flashattention.cu
         src/kernels/decode/paged_attention.cu
         src/kernels/decode_gemm.cu
+        src/kernels/argmax.cu
     )
 
     target_include_directories(mini_llm_kernels PUBLIC

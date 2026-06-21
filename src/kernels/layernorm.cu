@@ -10,7 +10,7 @@ __global__ void layernorm_kernel(
     float eps
 ) {
     constexpr int D = mini_llm::constants::GPT2_D_MODEL;
-    constexpr int VEC = 4;
+    //constexpr int VEC = 4;
     //constexpr int VEC_PER_ROW = D / VEC;
 
     int row = blockIdx.x;

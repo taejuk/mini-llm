@@ -9,6 +9,7 @@
 #include "kernels/linear.cuh"   
 #include "kernels/gelu.cuh"     
 #include "kernels/gemm.cuh"     
+#include "kernels/argmax.cuh"
 #include "kernels/decode/paged_attention.cuh"
 
 #include "runtime/pagekvcache.h"
@@ -646,18 +647,18 @@ std::vector<Rt::Response> GPT2Model::prefill(
             batch_size,
             seq_len,
             -1,
-            "logits_d2h"
+            "argmax_gpu"
         );
 
-        cudaMemcpy(
-            h_logits,
+        // Reuse d_tokens as a temporary [batch_size] output-token buffer.
+        // At this point, d_tokens is no longer needed for the current prefill step.
+        Kernel::argmax_gpu(
             buf_logits,
-            C::GPT2_VOCAB_SIZE * batch_size * sizeof(float),
-            cudaMemcpyDeviceToHost
+            d_tokens,
+            batch_size,
+            C::GPT2_VOCAB_SIZE
         );
     }
-
-    std::vector<int> output_tokens;
 
     {
         mini_llm::profiling::ScopedStageTimer timer(
@@ -666,13 +667,14 @@ std::vector<Rt::Response> GPT2Model::prefill(
             batch_size,
             seq_len,
             -1,
-            "argmax_cpu"
+            "token_d2h"
         );
 
-        output_tokens = argmax_cpu(
-            h_logits,
-            batch_size,
-            C::GPT2_VOCAB_SIZE
+        cudaMemcpy(
+            h_tokens,
+            d_tokens,
+            batch_size * sizeof(int),
+            cudaMemcpyDeviceToHost
         );
     }
 
@@ -690,10 +692,10 @@ std::vector<Rt::Response> GPT2Model::prefill(
         );
 
         for (int i = 0; i < batch_size; i++) {
-            bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+            bool done = h_tokens[i] == C::GPT2_EOS_TOKEN_ID;
             result.emplace_back(
                 reqs[i]->request_id,
-                output_tokens[i],
+                h_tokens[i],
                 done
             );
         }
@@ -1421,43 +1423,42 @@ std::vector<Rt::Response> GPT2Model::decode(
     }
 
     {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "logits_d2h"
-        );
+    mini_llm::profiling::ScopedStageTimer timer(
+        "MINI_LLM_PROFILE_DECODE",
+        "decode_top",
+        batch_size,
+        static_cast<std::size_t>(batch_size),
+        -1,
+        "argmax_gpu"
+    );
 
-        cudaMemcpy(
-            h_logits,
-            buf_logits,
-            static_cast<size_t>(batch_size) *
-                C::GPT2_VOCAB_SIZE *
-                sizeof(float),
-            cudaMemcpyDeviceToHost
-        );
-    }
+    // Reuse d_tokens as a temporary [batch_size] output-token buffer.
+    // Next decode step overwrites d_tokens with input token ids anyway.
+    Kernel::argmax_gpu(
+        buf_logits,
+        d_tokens,
+        batch_size,
+        C::GPT2_VOCAB_SIZE
+    );
+}
 
-    std::vector<int> output_tokens;
+{
+    mini_llm::profiling::ScopedStageTimer timer(
+        "MINI_LLM_PROFILE_DECODE",
+        "decode_top",
+        batch_size,
+        static_cast<std::size_t>(batch_size),
+        -1,
+        "token_d2h"
+    );
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "argmax_cpu"
-        );
-
-        output_tokens = argmax_cpu(
-            h_logits,
-            batch_size,
-            C::GPT2_VOCAB_SIZE
-        );
-    }
+    cudaMemcpy(
+        h_tokens,
+        d_tokens,
+        batch_size * sizeof(int),
+        cudaMemcpyDeviceToHost
+    );
+}
 
     std::vector<Rt::Response> result;
     result.reserve(batch_size);
@@ -1473,11 +1474,11 @@ std::vector<Rt::Response> GPT2Model::decode(
         );
 
         for (int i = 0; i < batch_size; i++) {
-            bool done = output_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+            bool done = h_tokens[i] == C::GPT2_EOS_TOKEN_ID;
 
             result.emplace_back(
                 reqs[i]->request_id,
-                output_tokens[i],
+                h_tokens[i],
                 done
             );
         }

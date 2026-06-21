@@ -4,7 +4,7 @@
 
 namespace mini_llm::runtime {
 struct Response {
-    uint64_t request_id = -1;
+    uint64_t request_id;
     int token;
     bool finished = false;
 
