@@ -14,6 +14,16 @@ void linear(
     int N
 );
 
+void linear_residual_add(
+    const float* x,
+    const float* weight,
+    const float* bias,
+    float* y,
+    int M,
+    int K,
+    int N
+);
+
 void qkv_projection(
     const float* buf_ln,
     const float* qkv_w,

@@ -709,4 +709,28 @@ void launch_gemm_bias(
     );
 }
 
+void launch_gemm_bias_residual(
+    M,
+    N,
+    K,
+    x,
+    weight,
+    bias,
+    y
+) {
+    launch_custom_gemm(
+        M,
+        N,
+        K,
+        1.0f,
+        A,
+        B,
+        1.0f,
+        bias,
+        C,
+        stream
+    );
+}
+
+
 } // namespace mini_llm::kernels

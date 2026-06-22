@@ -124,7 +124,7 @@ bool can_use_decode_gemm(
 
     // One CUDA block computes one output row and 32 output columns.
     // This supports small decode batches such as M=1,2,4,8,16.
-    if (M > 16) {
+    if (M >= 8) {
         return false;
     }
 

@@ -25,6 +25,27 @@ void linear(
     );
 }
 
+void linear_residual_add(
+    const float* x,
+    const float* weight,
+    const float* bias,
+    float* y,
+    int M,
+    int K,
+    int N
+) {
+    launch_gemm_bias_residual(
+        M,
+        N,
+        K,
+        x,
+        weight,
+        bias,
+        y
+    );
+}
+
+
 void qkv_projection(
     const float* buf_ln,
     const float* qkv_w,
