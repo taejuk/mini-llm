@@ -7,7 +7,7 @@ namespace mini_llm::kernels {
 
 namespace {
 
-constexpr int DECODE_M_TILE = 8;
+constexpr int DECODE_M_TILE = 1;
 constexpr int DECODE_N_TILE = 32;
 constexpr int DECODE_K_TILE = 64;
 
@@ -113,7 +113,6 @@ __global__ void decode_small_m_gemm_kernel(
 }
 
 } // anonymous namespace
-
 bool can_use_decode_gemm(
     int M,
     int N,
@@ -123,11 +122,9 @@ bool can_use_decode_gemm(
         return false;
     }
 
-    // Use the decode small-M GEMM only for larger decode batches.
-    // Batch-size 4 logits parity test is stricter than generation correctness,
-    // and the custom kernel's accumulated FP32 differences can exceed the
-    // test threshold even when top-1/top-5 are identical.
-    if (M < 8 || M > 16) {
+    // One CUDA block computes one output row and 32 output columns.
+    // This supports small decode batches such as M=1,2,4,8,16.
+    if (M > 16) {
         return false;
     }
 
@@ -148,8 +145,6 @@ bool can_use_decode_gemm(
 
     return is_qkv || is_attn_out || is_fc1 || is_fc2;
 }
-
-
 
 void launch_decode_gemm(
     int M,
