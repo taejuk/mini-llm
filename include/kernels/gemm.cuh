@@ -46,4 +46,15 @@ void launch_gemm_bias_residual(
     cudaStream_t stream = 0
 );
 
+void launch_gemm_bias_gelu(
+    int M,
+    int N,
+    int K,
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* C,
+    cudaStream_t stream = 0
+);
+
 } // namespace mini_llm::kernels

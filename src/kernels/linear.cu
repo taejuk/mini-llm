@@ -45,6 +45,26 @@ void linear_residual_add(
     );
 }
 
+void linear_gelu(
+    const float* x,
+    const float* weight,
+    const float* bias,
+    float* y,
+    int M,
+    int K,
+    int N
+) {
+    launch_gemm_bias_gelu(
+        M,
+        N,
+        K,
+        x,
+        weight,
+        bias,
+        y
+    );
+}
+
 
 void qkv_projection(
     const float* buf_ln,
