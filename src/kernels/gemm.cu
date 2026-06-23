@@ -710,13 +710,14 @@ void launch_gemm_bias(
 }
 
 void launch_gemm_bias_residual(
-    M,
-    N,
-    K,
-    x,
-    weight,
-    bias,
-    y
+    int M,
+    int N,
+    int K,
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* C,
+    cudaStream_t stream
 ) {
     launch_custom_gemm(
         M,
@@ -731,6 +732,5 @@ void launch_gemm_bias_residual(
         stream
     );
 }
-
 
 } // namespace mini_llm::kernels
