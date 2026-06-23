@@ -39,7 +39,8 @@ __global__ void decode_small_m_gemm_kernel(
     const float* __restrict__ B,
     float beta,
     const float* __restrict__ bias,
-    float* __restrict__ C
+    float* __restrict__ C,
+    bool apply_gelu
 ) {
     int local_col = threadIdx.x; // 0..31
     int local_row = threadIdx.y; // 0..7
@@ -107,8 +108,13 @@ __global__ void decode_small_m_gemm_kernel(
 
         float old = beta == 0.0f ? 0.0f : C[c_idx];
         float b = bias == nullptr ? 0.0f : bias[col];
-
-        C[c_idx] = alpha * acc + beta * old + b;
+        float out = alpha * acc + beta * old + b;
+        if (apply_gelu) {
+            out = 0.5f * out *
+            (1.0f + tanhf(0.7978845608f *
+            (out + 0.044715f * out * out * out)));
+        }
+        C[c_idx] = out;
     }
 }
 

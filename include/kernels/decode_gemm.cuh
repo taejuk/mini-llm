@@ -23,4 +23,17 @@ void launch_decode_gemm(
     cudaStream_t stream = 0
 );
 
+void launch_decode_gemm_gelu(
+    int M,
+    int N,
+    int K,
+    float alpha,
+    const float* A,
+    const float* B,
+    float beta,
+    const float* bias,
+    float* C,
+    cudaStream_t stream = 0
+);
+
 } // namespace mini_llm::kernels

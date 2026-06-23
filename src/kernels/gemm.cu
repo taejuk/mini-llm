@@ -12,6 +12,19 @@ namespace mini_llm::kernels {
 
 namespace {
 
+__device__ __forceinline__ float fused_gelu_one(float v) {
+    return 0.5f * v *
+           (1.0f + tanhf(0.7978845608f * (v + 0.044715f * v * v * v)));
+}
+
+__device__ __forceinline__ float maybe_gelu(
+    float v,
+    bool apply_gelu
+) {
+    return apply_gelu ? fused_gelu_one(v) : v;
+}
+
+
 bool use_cublas_gemm() {
     static bool enabled =
         std::getenv("MINI_LLM_USE_CUBLAS") != nullptr;
@@ -230,7 +243,8 @@ __global__ void gemm_general_kernel(
     const float* __restrict__ B,
     float beta,
     const float* __restrict__ bias,
-    float* __restrict__ C
+    float* __restrict__ C,
+    bool apply_gelu
 ) {
     const int cRow = blockIdx.y;
     const int cCol = blockIdx.x;
@@ -368,8 +382,9 @@ __global__ void gemm_general_kernel(
 
                 float old = beta == 0.0f ? 0.0f : C[cIdx];
                 float b = bias ? bias[globalColC] : 0.0f;
-
-                C[cIdx] = alpha * threadResults[i][j] + beta * old + b;
+                float out = alpha * threadResults[i][j] + beta * old + b;
+                out = maybe_gelu(out, apply_gelu);
+                C[cIdx] = out;
             }
         }
     }
@@ -384,7 +399,8 @@ __global__ void gemm_vectorized_bank_kernel(
     const float* __restrict__ B,
     float beta,
     const float* __restrict__ bias,
-    float* __restrict__ C
+    float* __restrict__ C,
+    bool apply_gelu
 ) {
     const int cRow = blockIdx.y;
     const int cCol = blockIdx.x;
@@ -512,38 +528,47 @@ __global__ void gemm_vectorized_bank_kernel(
         float b6 = bias ? bias[globalColBase + 6] : 0.0f;
         float b7 = bias ? bias[globalColBase + 7] : 0.0f;
 
-        if (beta == 0.0f) {
-            reinterpret_cast<float4*>(c0_ptr)[0] = make_float4(
-                alpha * threadResults[i][0] + b0,
-                alpha * threadResults[i][1] + b1,
-                alpha * threadResults[i][2] + b2,
-                alpha * threadResults[i][3] + b3
-            );
+        float o0, o1, o2, o3, o4, o5, o6, o7;
 
-            reinterpret_cast<float4*>(c1_ptr)[0] = make_float4(
-                alpha * threadResults[i][4] + b4,
-                alpha * threadResults[i][5] + b5,
-                alpha * threadResults[i][6] + b6,
-                alpha * threadResults[i][7] + b7
-            );
+        if (beta == 0.0f) {
+            o0 = alpha * threadResults[i][0] + b0;
+            o1 = alpha * threadResults[i][1] + b1;
+            o2 = alpha * threadResults[i][2] + b2;
+            o3 = alpha * threadResults[i][3] + b3;
+            o4 = alpha * threadResults[i][4] + b4;
+            o5 = alpha * threadResults[i][5] + b5;
+            o6 = alpha * threadResults[i][6] + b6;
+            o7 = alpha * threadResults[i][7] + b7;
         } else {
             float4 ec0 = reinterpret_cast<float4*>(c0_ptr)[0];
             float4 ec1 = reinterpret_cast<float4*>(c1_ptr)[0];
 
-            reinterpret_cast<float4*>(c0_ptr)[0] = make_float4(
-                alpha * threadResults[i][0] + beta * ec0.x + b0,
-                alpha * threadResults[i][1] + beta * ec0.y + b1,
-                alpha * threadResults[i][2] + beta * ec0.z + b2,
-                alpha * threadResults[i][3] + beta * ec0.w + b3
-            );
-
-            reinterpret_cast<float4*>(c1_ptr)[0] = make_float4(
-                alpha * threadResults[i][4] + beta * ec1.x + b4,
-                alpha * threadResults[i][5] + beta * ec1.y + b5,
-                alpha * threadResults[i][6] + beta * ec1.z + b6,
-                alpha * threadResults[i][7] + beta * ec1.w + b7
-            );
+            o0 = alpha * threadResults[i][0] + beta * ec0.x + b0;
+            o1 = alpha * threadResults[i][1] + beta * ec0.y + b1;
+            o2 = alpha * threadResults[i][2] + beta * ec0.z + b2;
+            o3 = alpha * threadResults[i][3] + beta * ec0.w + b3;
+            o4 = alpha * threadResults[i][4] + beta * ec1.x + b4;
+            o5 = alpha * threadResults[i][5] + beta * ec1.y + b5;
+            o6 = alpha * threadResults[i][6] + beta * ec1.z + b6;
+            o7 = alpha * threadResults[i][7] + beta * ec1.w + b7;
         }
+
+        o0 = maybe_gelu(o0, apply_gelu);
+        o1 = maybe_gelu(o1, apply_gelu);
+        o2 = maybe_gelu(o2, apply_gelu);
+        o3 = maybe_gelu(o3, apply_gelu);
+        o4 = maybe_gelu(o4, apply_gelu);
+        o5 = maybe_gelu(o5, apply_gelu);
+        o6 = maybe_gelu(o6, apply_gelu);
+        o7 = maybe_gelu(o7, apply_gelu);
+
+        reinterpret_cast<float4*>(c0_ptr)[0] = make_float4(
+            o0,
+            o1,
+            o2,
+            o3
+        );
+
     }
 }
 
@@ -557,7 +582,8 @@ void launch_custom_gemm(
     float beta,
     const float* bias,
     float* C,
-    cudaStream_t stream
+    cudaStream_t stream,
+    bool apply_gelu = false
 ) {
     if (can_use_decode_gemm(M, N, K)) {
         launch_decode_gemm(
@@ -592,7 +618,8 @@ void launch_custom_gemm(
             B,
             beta,
             bias,
-            C
+            C,
+            apply_gelu
         );
         return;
     }
@@ -606,7 +633,8 @@ void launch_custom_gemm(
         B,
         beta,
         bias,
-        C
+        C,
+        apply_gelu
     );
 }
 
@@ -706,6 +734,67 @@ void launch_gemm_bias(
         bias,
         C,
         stream
+    );
+}
+
+void launch_gemm_bias_gelu(
+    int M,
+    int N,
+    int K,
+    const float* A,
+    const float* B,
+    const float* bias,
+    float* C,
+    cudaStream_t stream
+) {
+    if (M <= 0 || N <= 0 || K <= 0) {
+        return;
+    }
+
+    if (use_cublas_gemm()) {
+        // cuBLAS path는 여기서는 진짜 fusion이 아님.
+        // GEMM + bias + GELU fallback.
+        launch_gemm_cublas_row_major(
+            M,
+            N,
+            K,
+            1.0f,
+            A,
+            B,
+            0.0f,
+            C,
+            stream
+        );
+
+        launch_add_bias(
+            C,
+            bias,
+            M,
+            N,
+            stream
+        );
+
+        gelu(
+            C,
+            M * N
+        );
+
+        return;
+    }
+
+    // custom GEMM path: GEMM store 단계에서 bias + GELU를 같이 적용
+    launch_custom_gemm(
+        M,
+        N,
+        K,
+        1.0f,
+        A,
+        B,
+        0.0f,
+        bias,
+        C,
+        stream,
+        true
     );
 }
 
