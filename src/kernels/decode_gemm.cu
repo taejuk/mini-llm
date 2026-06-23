@@ -187,7 +187,7 @@ bool can_use_decode_gemm(
             row-wise blocks lose weight-tile reuse for qkv/fc1,
             so fall back to the general GEMM path.
     */
-    if (M >= 8) {
+    if (M >= 4) {
         return false;
     }
 
