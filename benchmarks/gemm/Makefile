@@ -1,5 +1,5 @@
 NVCC = nvcc
-ARCH     = -arch=sm_75
+ARCH     = -arch=sm_70
 FLAGS    = -O3 $(ARCH) -I. -lcublas -lnvToolsExt -lineinfo
 TARGET   = gemm_bench
 

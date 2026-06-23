@@ -1,0 +1,7 @@
+device=NVIDIA TITAN V
+mode=full_naive
+prompt_len=512
+repeats=1
+gemm_backend=naive
+prefill_attention_backend=naive
+NOTE: full_naive means GEMM=naive and prefill attention=naive. Elementwise kernels such as embedding/layernorm/GELU/residual use the existing simple CUDA kernels.

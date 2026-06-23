@@ -1,0 +1,5 @@
+phase,gemm_backend,batch_size,prompt_len,repeats,avg_ms,p50_ms,p99_ms,min_ms,max_ms,tokens_per_sec,latency_per_token_ms
+decode,naive,1,512,10,8.55797,8.44054,9.57426,8.31592,9.68223,116.85,8.55797
+decode,naive,2,512,10,8.96289,9.0544,9.11738,8.29177,9.12162,223.142,4.48144
+decode,naive,4,512,10,9.11954,9.08259,9.98932,8.31063,9.99011,438.619,2.27988
+decode,naive,8,512,10,9.36319,9.363,9.38003,9.33158,9.38019,854.409,1.1704

@@ -1,0 +1,16 @@
+stage,total_ms,count,avg_ms,pct
+fc2,82.2475,84,0.9791,50.23
+qkv_projection,21.2427,84,0.2529,12.97
+attn_out_projection,21.2098,84,0.2525,12.95
+fc1,21.1825,84,0.2522,12.94
+paged_decode_attention,11.3972,84,0.1357,6.96
+paged_attention_tables_h2d,1.3972,84,0.0166,0.85
+append_kv_tables_h2d,1.0120,84,0.0120,0.62
+ln1,0.6650,84,0.0079,0.41
+ln2,0.6563,84,0.0078,0.40
+gelu,0.6496,84,0.0077,0.40
+residual_ffn,0.6267,84,0.0075,0.38
+append_decode_kv,0.6053,84,0.0072,0.37
+residual_attn,0.6029,84,0.0072,0.37
+build_paged_attention_tables_host,0.1510,84,0.0018,0.09
+build_append_kv_tables_host,0.0824,84,0.0010,0.05

@@ -1,0 +1,7 @@
+device=NVIDIA TITAN V
+repeats=10
+prompt_len=512
+backend_arg=optimized
+warmup_iters=2
+setup: prefill always uses optimized GEMM and flash prefill attention; only decode GEMM backend is swept.
+allocate_prefill failed: batch_size=16 prompt_len=512

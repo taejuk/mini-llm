@@ -1,0 +1,4 @@
+mode,prompt_len,output_tokens,repeats,total_avg_ms,total_p50_ms,total_p99_ms,total_min_ms,total_max_ms,ttft_avg_ms,ttft_p50_ms,ttft_p99_ms,tokens_per_sec
+full_naive,512,100,1,860.995,860.995,860.995,860.995,860.995,68.1485,68.1485,68.1485,116.145
+full_naive,512,200,1,1672.73,1672.73,1672.73,1672.73,1672.73,65.259,65.259,65.259,119.565
+full_naive,512,300,1,2509.56,2509.56,2509.56,2509.56,2509.56,65.2663,65.2663,65.2663,119.543
