@@ -1,5 +1,6 @@
 #include "kernels/gemm.cuh"
 #include "kernels/decode_gemm.cuh"
+#include "kernels/gelu.cuh"
 
 #include <cublas_v2.h>
 #include <cuda_runtime.h>
@@ -7,6 +8,7 @@
 #include <stdint.h>
 #include <cstdlib>
 #include <iostream>
+#include <math.h>
 
 namespace mini_llm::kernels {
 
@@ -23,7 +25,6 @@ __device__ __forceinline__ float maybe_gelu(
 ) {
     return apply_gelu ? fused_gelu_one(v) : v;
 }
-
 
 bool use_cublas_gemm() {
     static bool enabled =
@@ -569,6 +570,12 @@ __global__ void gemm_vectorized_bank_kernel(
             o3
         );
 
+        reinterpret_cast<float4*>(c1_ptr)[0] = make_float4(
+            o4,
+            o5,
+            o6,
+            o7
+        );
     }
 }
 
@@ -586,18 +593,34 @@ void launch_custom_gemm(
     bool apply_gelu = false
 ) {
     if (can_use_decode_gemm(M, N, K)) {
-        launch_decode_gemm(
-            M,
-            N,
-            K,
-            alpha,
-            A,
-            B,
-            beta,
-            bias,
-            C,
-            stream
-        );
+        if (apply_gelu) {
+            launch_decode_gemm_gelu(
+                M,
+                N,
+                K,
+                alpha,
+                A,
+                B,
+                beta,
+                bias,
+                C,
+                stream
+            );
+        } else {
+            launch_decode_gemm(
+                M,
+                N,
+                K,
+                alpha,
+                A,
+                B,
+                beta,
+                bias,
+                C,
+                stream
+            );
+        }
+
         return;
     }
 
@@ -637,7 +660,6 @@ void launch_custom_gemm(
         apply_gelu
     );
 }
-
 
 } // anonymous namespace
 
@@ -752,8 +774,8 @@ void launch_gemm_bias_gelu(
     }
 
     if (use_cublas_gemm()) {
-        // cuBLAS path는 여기서는 진짜 fusion이 아님.
-        // GEMM + bias + GELU fallback.
+        // cuBLAS path is not a true epilogue fusion.
+        // It still preserves correctness by running GEMM + bias + GELU.
         launch_gemm_cublas_row_major(
             M,
             N,
@@ -782,7 +804,8 @@ void launch_gemm_bias_gelu(
         return;
     }
 
-    // custom GEMM path: GEMM store 단계에서 bias + GELU를 같이 적용
+    // custom GEMM path: apply bias + GELU in the GEMM store path.
+    // For small decode M, this dispatches to launch_decode_gemm_gelu().
     launch_custom_gemm(
         M,
         N,
