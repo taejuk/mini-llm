@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
@@ -33,11 +34,24 @@ struct Result {
     double p99_ms = 0.0;
 };
 
-struct Sample {
-    float h2d_ms = 0.0f;
-    float scatter_ms = 0.0f;
-    float total_ms = 0.0f;
+struct DirectSample {
+    double wall_total_ms = 0.0;
+    float event_total_ms = 0.0f;
 };
+
+struct BufferedSample {
+    double wall_total_ms = 0.0;
+    float event_total_ms = 0.0f;
+    float event_h2d_ms = 0.0f;
+    float event_scatter_ms = 0.0f;
+};
+
+double now_ms() {
+    using clock = std::chrono::high_resolution_clock;
+    auto now = clock::now().time_since_epoch();
+
+    return std::chrono::duration<double, std::milli>(now).count();
+}
 
 double avg(const std::vector<double>& values) {
     if (values.empty()) {
@@ -73,8 +87,10 @@ Result summarize(const std::vector<double>& samples) {
 
 std::vector<int> make_destination_blocks(int blocks, std::mt19937& rng) {
     std::vector<int> dst(blocks);
+
     std::iota(dst.begin(), dst.end(), 0);
     std::shuffle(dst.begin(), dst.end(), rng);
+
     return dst;
 }
 
@@ -122,7 +138,57 @@ __global__ void scatter_from_buffer_to_blocks_kernel(
     }
 }
 
-Sample run_buffered_swap_in_once(
+DirectSample run_direct_async_once(
+    float* d_blocks,
+    const float* h_blocks,
+    const std::vector<int>& dst_blocks,
+    int blocks,
+    size_t block_elems,
+    size_t block_bytes,
+    cudaStream_t stream,
+    cudaEvent_t event_start,
+    cudaEvent_t event_stop
+) {
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    double wall_t0 = now_ms();
+
+    CUDA_CHECK(cudaEventRecord(event_start, stream));
+
+    for (int i = 0; i < blocks; ++i) {
+        const float* src =
+            h_blocks + static_cast<size_t>(i) * block_elems;
+
+        float* dst =
+            d_blocks + static_cast<size_t>(dst_blocks[i]) * block_elems;
+
+        CUDA_CHECK(cudaMemcpyAsync(
+            dst,
+            src,
+            block_bytes,
+            cudaMemcpyHostToDevice,
+            stream
+        ));
+    }
+
+    CUDA_CHECK(cudaEventRecord(event_stop, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    double wall_t1 = now_ms();
+
+    DirectSample sample;
+    sample.wall_total_ms = wall_t1 - wall_t0;
+
+    CUDA_CHECK(cudaEventElapsedTime(
+        &sample.event_total_ms,
+        event_start,
+        event_stop
+    ));
+
+    return sample;
+}
+
+BufferedSample run_buffered_async_once(
     float* d_blocks,
     float* d_buffer,
     const float* h_contiguous_blocks,
@@ -130,19 +196,16 @@ Sample run_buffered_swap_in_once(
     int blocks,
     size_t block_elems,
     size_t bytes,
-    cudaStream_t stream
+    cudaStream_t stream,
+    cudaEvent_t event_start,
+    cudaEvent_t event_h2d_done,
+    cudaEvent_t event_stop
 ) {
-    cudaEvent_t start;
-    cudaEvent_t h2d_done;
-    cudaEvent_t stop;
-
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&h2d_done));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    CUDA_CHECK(cudaEventRecord(start, stream));
+    double wall_t0 = now_ms();
+
+    CUDA_CHECK(cudaEventRecord(event_start, stream));
 
     CUDA_CHECK(cudaMemcpyAsync(
         d_buffer,
@@ -152,7 +215,7 @@ Sample run_buffered_swap_in_once(
         stream
     ));
 
-    CUDA_CHECK(cudaEventRecord(h2d_done, stream));
+    CUDA_CHECK(cudaEventRecord(event_h2d_done, stream));
 
     constexpr int threads = 256;
     int grid = blocks;
@@ -167,18 +230,31 @@ Sample run_buffered_swap_in_once(
 
     CUDA_CHECK(cudaGetLastError());
 
-    CUDA_CHECK(cudaEventRecord(stop, stream));
-    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventRecord(event_stop, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    Sample sample;
+    double wall_t1 = now_ms();
 
-    CUDA_CHECK(cudaEventElapsedTime(&sample.h2d_ms, start, h2d_done));
-    CUDA_CHECK(cudaEventElapsedTime(&sample.scatter_ms, h2d_done, stop));
-    CUDA_CHECK(cudaEventElapsedTime(&sample.total_ms, start, stop));
+    BufferedSample sample;
+    sample.wall_total_ms = wall_t1 - wall_t0;
 
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(h2d_done));
-    CUDA_CHECK(cudaEventDestroy(stop));
+    CUDA_CHECK(cudaEventElapsedTime(
+        &sample.event_total_ms,
+        event_start,
+        event_stop
+    ));
+
+    CUDA_CHECK(cudaEventElapsedTime(
+        &sample.event_h2d_ms,
+        event_start,
+        event_h2d_done
+    ));
+
+    CUDA_CHECK(cudaEventElapsedTime(
+        &sample.event_scatter_ms,
+        event_h2d_done,
+        event_stop
+    ));
 
     return sample;
 }
@@ -204,7 +280,7 @@ int main(int argc, char** argv) {
 
     if (iterations <= 0 || warmup < 0) {
         std::cerr
-            << "usage: ./bench_buffered_swap_in_by_blocks "
+            << "usage: ./bench_fair_direct_vs_buffered_swap_in "
             << "[iterations] [warmup] [seed]\n";
         return 1;
     }
@@ -217,6 +293,7 @@ int main(int argc, char** argv) {
     const size_t block_bytes = block_elems * sizeof(float);
 
     int max_blocks = 0;
+
     for (int b : BLOCK_COUNTS) {
         max_blocks = std::max(max_blocks, b);
     }
@@ -234,53 +311,78 @@ int main(int argc, char** argv) {
     std::cout << "block_bytes=" << block_bytes << "\n";
     std::cout << "iterations=" << iterations << "\n";
     std::cout << "warmup=" << warmup << "\n";
-    std::cout << "NOTE: buffered swap_in uses one large H2D copy into GPU buffer.\n";
-    std::cout << "NOTE: then a GPU scatter kernel copies buffer blocks into destination blocks.\n";
+    std::cout << "NOTE: direct uses N cudaMemcpyAsync H2D calls, one per block.\n";
+    std::cout << "NOTE: buffered uses one cudaMemcpyAsync H2D call plus one scatter kernel.\n";
+    std::cout << "NOTE: both use pinned host memory, the same stream, wall time, and CUDA events.\n";
     std::cout << "NOTE: no BlockManager, no RealKvAllocator.\n\n";
 
-    float* h_contiguous_blocks = nullptr;
+    float* h_blocks = nullptr;
+
     CUDA_CHECK(cudaMallocHost(
-        reinterpret_cast<void**>(&h_contiguous_blocks),
+        reinterpret_cast<void**>(&h_blocks),
         max_bytes
     ));
 
     fill_host_blocks(
-        h_contiguous_blocks,
+        h_blocks,
         max_blocks,
         block_elems
     );
 
+    float* d_direct_blocks = nullptr;
+    float* d_buffered_blocks = nullptr;
     float* d_buffer = nullptr;
+    int* d_dst_blocks = nullptr;
+
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_direct_blocks),
+        max_bytes
+    ));
+
+    CUDA_CHECK(cudaMalloc(
+        reinterpret_cast<void**>(&d_buffered_blocks),
+        max_bytes
+    ));
+
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&d_buffer),
         max_bytes
     ));
 
-    float* d_blocks = nullptr;
-    CUDA_CHECK(cudaMalloc(
-        reinterpret_cast<void**>(&d_blocks),
-        max_bytes
-    ));
-
-    int* d_dst_blocks = nullptr;
     CUDA_CHECK(cudaMalloc(
         reinterpret_cast<void**>(&d_dst_blocks),
         static_cast<size_t>(max_blocks) * sizeof(int)
     ));
 
     cudaStream_t stream;
+
     CUDA_CHECK(cudaStreamCreateWithFlags(
         &stream,
         cudaStreamNonBlocking
     ));
 
+    cudaEvent_t event_start;
+    cudaEvent_t event_mid;
+    cudaEvent_t event_stop;
+
+    CUDA_CHECK(cudaEventCreate(&event_start));
+    CUDA_CHECK(cudaEventCreate(&event_mid));
+    CUDA_CHECK(cudaEventCreate(&event_stop));
+
     std::mt19937 rng(seed);
 
     std::cout
         << "blocks,bytes,"
-        << "total_avg_ms,total_p50_ms,total_p99_ms,"
-        << "h2d_avg_ms,scatter_avg_ms,"
-        << "avg_us_per_block,effective_gbps\n";
+        << "direct_wall_avg_ms,direct_wall_p50_ms,direct_wall_p99_ms,"
+        << "direct_event_avg_ms,direct_event_p50_ms,direct_event_p99_ms,"
+        << "direct_wall_us_per_block,direct_event_us_per_block,"
+        << "direct_wall_gbps,direct_event_gbps,"
+        << "buffered_wall_avg_ms,buffered_wall_p50_ms,buffered_wall_p99_ms,"
+        << "buffered_event_avg_ms,buffered_event_p50_ms,buffered_event_p99_ms,"
+        << "buffered_h2d_avg_ms,buffered_scatter_avg_ms,"
+        << "buffered_wall_us_per_block,buffered_event_us_per_block,"
+        << "buffered_wall_gbps,buffered_event_gbps,"
+        << "wall_speedup,event_speedup\n";
 
     for (int blocks : BLOCK_COUNTS) {
         size_t bytes = static_cast<size_t>(blocks) * block_bytes;
@@ -296,75 +398,194 @@ int main(int argc, char** argv) {
         ));
 
         for (int i = 0; i < warmup; ++i) {
-            (void)run_buffered_swap_in_once(
-                d_blocks,
+            (void)run_direct_async_once(
+                d_direct_blocks,
+                h_blocks,
+                dst_blocks,
+                blocks,
+                block_elems,
+                block_bytes,
+                stream,
+                event_start,
+                event_stop
+            );
+
+            (void)run_buffered_async_once(
+                d_buffered_blocks,
                 d_buffer,
-                h_contiguous_blocks,
+                h_blocks,
                 d_dst_blocks,
                 blocks,
                 block_elems,
                 bytes,
-                stream
+                stream,
+                event_start,
+                event_mid,
+                event_stop
             );
         }
 
-        std::vector<double> total_samples;
-        std::vector<double> h2d_samples;
-        std::vector<double> scatter_samples;
+        std::vector<double> direct_wall_samples;
+        std::vector<double> direct_event_samples;
 
-        total_samples.reserve(iterations);
-        h2d_samples.reserve(iterations);
-        scatter_samples.reserve(iterations);
+        std::vector<double> buffered_wall_samples;
+        std::vector<double> buffered_event_samples;
+        std::vector<double> buffered_h2d_samples;
+        std::vector<double> buffered_scatter_samples;
+
+        direct_wall_samples.reserve(iterations);
+        direct_event_samples.reserve(iterations);
+
+        buffered_wall_samples.reserve(iterations);
+        buffered_event_samples.reserve(iterations);
+        buffered_h2d_samples.reserve(iterations);
+        buffered_scatter_samples.reserve(iterations);
 
         for (int i = 0; i < iterations; ++i) {
-            Sample sample = run_buffered_swap_in_once(
-                d_blocks,
+            DirectSample direct_sample = run_direct_async_once(
+                d_direct_blocks,
+                h_blocks,
+                dst_blocks,
+                blocks,
+                block_elems,
+                block_bytes,
+                stream,
+                event_start,
+                event_stop
+            );
+
+            BufferedSample buffered_sample = run_buffered_async_once(
+                d_buffered_blocks,
                 d_buffer,
-                h_contiguous_blocks,
+                h_blocks,
                 d_dst_blocks,
                 blocks,
                 block_elems,
                 bytes,
-                stream
+                stream,
+                event_start,
+                event_mid,
+                event_stop
             );
 
-            total_samples.push_back(sample.total_ms);
-            h2d_samples.push_back(sample.h2d_ms);
-            scatter_samples.push_back(sample.scatter_ms);
+            direct_wall_samples.push_back(direct_sample.wall_total_ms);
+            direct_event_samples.push_back(direct_sample.event_total_ms);
+
+            buffered_wall_samples.push_back(buffered_sample.wall_total_ms);
+            buffered_event_samples.push_back(buffered_sample.event_total_ms);
+            buffered_h2d_samples.push_back(buffered_sample.event_h2d_ms);
+            buffered_scatter_samples.push_back(buffered_sample.event_scatter_ms);
         }
 
-        Result total_res = summarize(total_samples);
-        Result h2d_res = summarize(h2d_samples);
-        Result scatter_res = summarize(scatter_samples);
+        Result direct_wall_res = summarize(direct_wall_samples);
+        Result direct_event_res = summarize(direct_event_samples);
 
-        double avg_us_per_block =
-            (total_res.avg_ms * 1000.0) / static_cast<double>(blocks);
+        Result buffered_wall_res = summarize(buffered_wall_samples);
+        Result buffered_event_res = summarize(buffered_event_samples);
+        Result buffered_h2d_res = summarize(buffered_h2d_samples);
+        Result buffered_scatter_res = summarize(buffered_scatter_samples);
 
-        double effective_gbps =
-            total_res.avg_ms > 0.0
+        double direct_wall_us_per_block =
+            (direct_wall_res.avg_ms * 1000.0) /
+            static_cast<double>(blocks);
+
+        double direct_event_us_per_block =
+            (direct_event_res.avg_ms * 1000.0) /
+            static_cast<double>(blocks);
+
+        double buffered_wall_us_per_block =
+            (buffered_wall_res.avg_ms * 1000.0) /
+            static_cast<double>(blocks);
+
+        double buffered_event_us_per_block =
+            (buffered_event_res.avg_ms * 1000.0) /
+            static_cast<double>(blocks);
+
+        double direct_wall_gbps =
+            direct_wall_res.avg_ms > 0.0
                 ? (static_cast<double>(bytes) / 1.0e9) /
-                  (total_res.avg_ms / 1000.0)
+                  (direct_wall_res.avg_ms / 1000.0)
+                : 0.0;
+
+        double direct_event_gbps =
+            direct_event_res.avg_ms > 0.0
+                ? (static_cast<double>(bytes) / 1.0e9) /
+                  (direct_event_res.avg_ms / 1000.0)
+                : 0.0;
+
+        double buffered_wall_gbps =
+            buffered_wall_res.avg_ms > 0.0
+                ? (static_cast<double>(bytes) / 1.0e9) /
+                  (buffered_wall_res.avg_ms / 1000.0)
+                : 0.0;
+
+        double buffered_event_gbps =
+            buffered_event_res.avg_ms > 0.0
+                ? (static_cast<double>(bytes) / 1.0e9) /
+                  (buffered_event_res.avg_ms / 1000.0)
+                : 0.0;
+
+        double wall_speedup =
+            buffered_wall_res.avg_ms > 0.0
+                ? direct_wall_res.avg_ms / buffered_wall_res.avg_ms
+                : 0.0;
+
+        double event_speedup =
+            buffered_event_res.avg_ms > 0.0
+                ? direct_event_res.avg_ms / buffered_event_res.avg_ms
                 : 0.0;
 
         std::cout
             << blocks << ","
             << bytes << ","
-            << total_res.avg_ms << ","
-            << total_res.p50_ms << ","
-            << total_res.p99_ms << ","
-            << h2d_res.avg_ms << ","
-            << scatter_res.avg_ms << ","
-            << avg_us_per_block << ","
-            << effective_gbps
+
+            << direct_wall_res.avg_ms << ","
+            << direct_wall_res.p50_ms << ","
+            << direct_wall_res.p99_ms << ","
+
+            << direct_event_res.avg_ms << ","
+            << direct_event_res.p50_ms << ","
+            << direct_event_res.p99_ms << ","
+
+            << direct_wall_us_per_block << ","
+            << direct_event_us_per_block << ","
+
+            << direct_wall_gbps << ","
+            << direct_event_gbps << ","
+
+            << buffered_wall_res.avg_ms << ","
+            << buffered_wall_res.p50_ms << ","
+            << buffered_wall_res.p99_ms << ","
+
+            << buffered_event_res.avg_ms << ","
+            << buffered_event_res.p50_ms << ","
+            << buffered_event_res.p99_ms << ","
+
+            << buffered_h2d_res.avg_ms << ","
+            << buffered_scatter_res.avg_ms << ","
+
+            << buffered_wall_us_per_block << ","
+            << buffered_event_us_per_block << ","
+
+            << buffered_wall_gbps << ","
+            << buffered_event_gbps << ","
+
+            << wall_speedup << ","
+            << event_speedup
             << "\n";
     }
+
+    CUDA_CHECK(cudaEventDestroy(event_stop));
+    CUDA_CHECK(cudaEventDestroy(event_mid));
+    CUDA_CHECK(cudaEventDestroy(event_start));
 
     CUDA_CHECK(cudaStreamDestroy(stream));
 
     CUDA_CHECK(cudaFree(d_dst_blocks));
-    CUDA_CHECK(cudaFree(d_blocks));
     CUDA_CHECK(cudaFree(d_buffer));
-    CUDA_CHECK(cudaFreeHost(h_contiguous_blocks));
+    CUDA_CHECK(cudaFree(d_buffered_blocks));
+    CUDA_CHECK(cudaFree(d_direct_blocks));
+    CUDA_CHECK(cudaFreeHost(h_blocks));
 
     return 0;
 }
