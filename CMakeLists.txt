@@ -291,6 +291,19 @@ if(BUILD_CUDA_TESTS)
             CUDA::cudart
         )
     endif()
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/runtime/bench_direct_swap_in_by_blocks.cu")
+        add_executable(bench_direct_swap_in_by_blocks
+            benchmarks/runtime/bench_direct_swap_in_by_blocks.cu
+        )
+
+        target_include_directories(bench_direct_swap_in_by_blocks PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+
+        target_link_libraries(bench_direct_swap_in_by_blocks PRIVATE
+            CUDA::cudart
+        )
+    endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/gpt2/bench_batch_vs_single_wall.cu")
         add_executable(bench_batch_vs_single_wall
             benchmarks/gpt2/bench_batch_vs_single_wall.cu
