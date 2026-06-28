@@ -318,4 +318,18 @@ if(BUILD_CUDA_TESTS)
             CUDA::cudart
         )
     endif()
+
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/runtime/bench_buffered_swap_in_by_blocks.cu")
+        add_executable(bench_buffered_swap_in_by_blocks
+            benchmarks/runtime/bench_buffered_swap_in_by_blocks.cu
+        )
+
+        target_include_directories(bench_buffered_swap_in_by_blocks PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        )
+
+        target_link_libraries(bench_buffered_swap_in_by_blocks PRIVATE
+            CUDA::cudart
+        )
+    endif()
 endif()
