@@ -326,8 +326,6 @@ void Scheduler::worker_loop() {
         if (!admission_paused_) {
             drain_new_requests();
         }
-        // swap_in을 비동기로 처리하자.
-        // 
         is_progress |= retry_swap_in_requests();
 
         retry_deferred_decode();
