@@ -376,34 +376,29 @@ std::vector<Rt::Response> GPT2Model::prefill(
 
     
 
-        int pos = 0;
-        for (const auto& req : reqs) {
-            for (int i = 0; i < req->prompts_len; i++) {
-                h_tokens[pos] = req->tokens[i];
-                h_pos[pos] = i;
-                pos++;
-            }
+    int pos = 0;
+    for (const auto& req : reqs) {
+        for (int i = 0; i < req->prompts_len; i++) {
+            h_tokens[pos] = req->tokens[i];
+            h_pos[pos] = i;
+            pos++;
         }
+    }
     
 
     int size = static_cast<int>(seq_len * sizeof(int));
 
-    
+    cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
 
-        cudaMemcpy(d_tokens, h_tokens, size, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_pos, h_pos, size, cudaMemcpyHostToDevice);
-    
-
-    
-
-        Kernel::embedding_lookup(
-            d_tokens,
-            d_pos,
-            W.wte,
-            W.wpe,
-            buf_x,
-            seq_len
-        );
+    Kernel::embedding_lookup(
+        d_tokens,
+        d_pos,
+        W.wte,
+        W.wpe,
+        buf_x,
+        seq_len
+    );
     
 
     for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
@@ -466,449 +461,229 @@ std::vector<Rt::Response> GPT2Model::decode(
         return {};
     }
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "prepare_input_host"
-        );
+    
 
-        for (int i = 0; i < batch_size; i++) {
-            h_tokens[i] = reqs[i]->tokens.back();
-            h_pos[i] = static_cast<int>(reqs[i]->tokens.size()) - 1;
-        }
+    for (int i = 0; i < batch_size; i++) {
+        h_tokens[i] = reqs[i]->tokens.back();
+        h_pos[i] = static_cast<int>(reqs[i]->tokens.size()) - 1;
     }
+
 
     int token_bytes = batch_size * sizeof(int);
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "input_h2d"
-        );
-
-        cudaMemcpy(d_tokens, h_tokens, token_bytes, cudaMemcpyHostToDevice);
-        cudaMemcpy(d_pos, h_pos, token_bytes, cudaMemcpyHostToDevice);
-    }
-
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "embedding"
-        );
-
-        Kernel::embedding_lookup(
-            d_tokens,
-            d_pos,
-            W.wte,
-            W.wpe,
-            buf_x,
-            batch_size
-        );
-    }
+    cudaMemcpy(d_tokens, h_tokens, token_bytes, cudaMemcpyHostToDevice);
+    cudaMemcpy(d_pos, h_pos, token_bytes, cudaMemcpyHostToDevice);
+    
+    Kernel::embedding_lookup(
+        d_tokens,
+        d_pos,
+        W.wte,
+        W.wpe,
+        buf_x,
+        batch_size
+    );
+    
 
     for (int layer = 0; layer < C::GPT2_N_LAYERS; layer++) {
-        std::string layer_stage =
-            "decode_layer_" + std::to_string(layer);
-
-        mini_llm::profiling::ScopedStageTimer layer_timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
+        Kernel::layernorm(
+            buf_x,
+            W.ln1_w[layer],
+            W.ln1_b[layer],
+            buf_ln,
             batch_size,
-            static_cast<std::size_t>(batch_size),
-            layer,
-            layer_stage.c_str()
+            C::GPT2_D_MODEL
         );
 
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "ln1"
-            );
+        Kernel::qkv_projection(
+            buf_ln,
+            W.qkv_w[layer],
+            W.qkv_b[layer],
+            buf_qkv,
+            batch_size
+        );
 
-            Kernel::layernorm(
-                buf_x,
-                W.ln1_w[layer],
-                W.ln1_b[layer],
-                buf_ln,
-                batch_size,
-                C::GPT2_D_MODEL
-            );
+        for (int i = 0; i < batch_size; i++) {
+            Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
+
+            int cached_tokens = kv.num_tokens_;
+            int logical_block =
+                cached_tokens / C::DEFAULT_KV_BLOCK_SIZE;
+            int offset_in_block =
+                cached_tokens % C::DEFAULT_KV_BLOCK_SIZE;
+
+            int physical_block =
+                kv.physical_block_id(logical_block);
+
+            h_token_to_block[i] = physical_block;
+            h_token_to_offset[i] = offset_in_block;
         }
+    
+        cudaMemcpy(
+            d_token_to_block,
+            h_token_to_block,
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
 
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "qkv_projection"
-            );
-
-            Kernel::qkv_projection(
-                buf_ln,
-                W.qkv_w[layer],
-                W.qkv_b[layer],
-                buf_qkv,
-                batch_size
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "build_append_kv_tables_host"
-            );
-
-            for (int i = 0; i < batch_size; i++) {
-                Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
-
-                int cached_tokens = kv.num_tokens_;
-                int logical_block =
-                    cached_tokens / C::DEFAULT_KV_BLOCK_SIZE;
-                int offset_in_block =
-                    cached_tokens % C::DEFAULT_KV_BLOCK_SIZE;
-
-                int physical_block =
-                    kv.physical_block_id(logical_block);
-
-                h_token_to_block[i] = physical_block;
-                h_token_to_offset[i] = offset_in_block;
-            }
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "append_kv_tables_h2d"
-            );
-
-            cudaMemcpy(
-                d_token_to_block,
-                h_token_to_block,
-                batch_size * sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-
-            cudaMemcpy(
-                d_token_to_offset,
-                h_token_to_offset,
-                batch_size * sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "append_decode_kv"
-            );
-
-            Kernel::append_prefill_kv(
-                buf_qkv,
-                pool,
-                d_token_to_block,
-                d_token_to_offset,
-                batch_size
-            );
-        }
+        cudaMemcpy(
+            d_token_to_offset,
+            h_token_to_offset,
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+    
+        Kernel::append_prefill_kv(
+            buf_qkv,
+            pool,
+            d_token_to_block,
+            d_token_to_offset,
+            batch_size
+        );
+    
 
         std::vector<int> h_flat_block_table;
         std::vector<int> h_block_offsets(batch_size);
         std::vector<int> h_num_tokens(batch_size);
 
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "build_paged_attention_tables_host"
-            );
+    
 
-            h_flat_block_table.reserve(
-                static_cast<size_t>(batch_size) *
-                ((C::MAX_SEQ + C::DEFAULT_KV_BLOCK_SIZE - 1) /
-                 C::DEFAULT_KV_BLOCK_SIZE)
-            );
-
-            for (int i = 0; i < batch_size; i++) {
-                Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
-
-                h_block_offsets[i] =
-                    static_cast<int>(h_flat_block_table.size());
-
-                for (int block_id : kv.block_table_) {
-                    h_flat_block_table.push_back(block_id);
-                }
-
-                h_num_tokens[i] = kv.num_tokens_ + 1;
-            }
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "paged_attention_tables_h2d"
-            );
-
-            cudaMemcpy(
-                d_block_table,
-                h_flat_block_table.data(),
-                h_flat_block_table.size() * sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-
-            cudaMemcpy(
-                d_block_offsets,
-                h_block_offsets.data(),
-                batch_size * sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-
-            cudaMemcpy(
-                d_num_tokens,
-                h_num_tokens.data(),
-                batch_size * sizeof(int),
-                cudaMemcpyHostToDevice
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "paged_decode_attention"
-            );
-
-            Kernel::paged_decode_attention(
-                buf_qkv,
-                d_block_table,
-                d_block_offsets,
-                d_num_tokens,
-                pool,
-                buf_attn_out,
-                batch_size,
-                C::MAX_SEQ
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "attn_out_residual"
-            );
-
-            Kernel::linear_residual_add(
-                buf_attn_out,
-                W.out_w[layer],
-                W.out_b[layer],
-                buf_x,
-                batch_size,
-                C::GPT2_D_MODEL,
-                C::GPT2_D_MODEL
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "ln2"
-            );
-
-            Kernel::layernorm(
-                buf_x,
-                W.ln2_w[layer],
-                W.ln2_b[layer],
-                buf_ln,
-                batch_size,
-                C::GPT2_D_MODEL
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "fc1_gelu"
-            );
-
-            Kernel::linear_gelu(
-                buf_ln,
-                W.fc1_w[layer],
-                W.fc1_b[layer],
-                buf_ff,
-                batch_size,
-                C::GPT2_D_MODEL,
-                C::GPT2_D_FF
-            );
-        }
-
-        {
-            mini_llm::profiling::ScopedStageTimer timer(
-                "MINI_LLM_PROFILE_BLOCK_DECODE",
-                "block_decode_stage",
-                batch_size,
-                static_cast<std::size_t>(batch_size),
-                layer,
-                "fc2_residual"
-            );
-
-            Kernel::linear_residual_add(
-                buf_ff,
-                W.fc2_w[layer],
-                W.fc2_b[layer],
-                buf_x,
-                batch_size,
-                C::GPT2_D_FF,
-                C::GPT2_D_MODEL
-            );
-        }
-    }
-
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "final_layernorm"
+        h_flat_block_table.reserve(
+            static_cast<size_t>(batch_size) *
+            ((C::MAX_SEQ + C::DEFAULT_KV_BLOCK_SIZE - 1) /
+                C::DEFAULT_KV_BLOCK_SIZE)
         );
 
+        for (int i = 0; i < batch_size; i++) {
+            Rt::PagedKVCache& kv = reqs[i]->layer_kv[layer];
+
+            h_block_offsets[i] =
+                static_cast<int>(h_flat_block_table.size());
+
+            for (int block_id : kv.block_table_) {
+                h_flat_block_table.push_back(block_id);
+            }
+
+            h_num_tokens[i] = kv.num_tokens_ + 1;
+        }
+    
+        cudaMemcpy(
+            d_block_table,
+            h_flat_block_table.data(),
+            h_flat_block_table.size() * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_block_offsets,
+            h_block_offsets.data(),
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_num_tokens,
+            h_num_tokens.data(),
+            batch_size * sizeof(int),
+            cudaMemcpyHostToDevice
+        );
+    
+        Kernel::paged_decode_attention(
+            buf_qkv,
+            d_block_table,
+            d_block_offsets,
+            d_num_tokens,
+            pool,
+            buf_attn_out,
+            batch_size,
+            C::MAX_SEQ
+        );
+    
+        Kernel::linear_residual_add(
+            buf_attn_out,
+            W.out_w[layer],
+            W.out_b[layer],
+            buf_x,
+            batch_size,
+            C::GPT2_D_MODEL,
+            C::GPT2_D_MODEL
+        );
+    
         Kernel::layernorm(
             buf_x,
-            W.ln_f_w,
-            W.ln_f_b,
+            W.ln2_w[layer],
+            W.ln2_b[layer],
             buf_ln,
             batch_size,
             C::GPT2_D_MODEL
         );
-    }
-
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "vocab_gemm"
-        );
-
-        Kernel::launch_gemm(
-            batch_size,
-            C::GPT2_VOCAB_SIZE,
-            C::GPT2_D_MODEL,
-            1.0f,
+    
+        Kernel::linear_gelu(
             buf_ln,
-            W.wte_t,
-            0.0f,
-            buf_logits
+            W.fc1_w[layer],
+            W.fc1_b[layer],
+            buf_ff,
+            batch_size,
+            C::GPT2_D_MODEL,
+            C::GPT2_D_FF
         );
+    
+        Kernel::linear_residual_add(
+            buf_ff,
+            W.fc2_w[layer],
+            W.fc2_b[layer],
+            buf_x,
+            batch_size,
+            C::GPT2_D_FF,
+            C::GPT2_D_MODEL
+        );
+        
     }
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "argmax_gpu"
-        );
+    Kernel::layernorm(
+        buf_x,
+        W.ln_f_w,
+        W.ln_f_b,
+        buf_ln,
+        batch_size,
+        C::GPT2_D_MODEL
+    );
 
-        Kernel::argmax_gpu(
-            buf_logits,
-            d_tokens,
-            batch_size,
-            C::GPT2_VOCAB_SIZE
-        );
-    }
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "token_d2h"
-        );
+    Kernel::launch_gemm(
+        batch_size,
+        C::GPT2_VOCAB_SIZE,
+        C::GPT2_D_MODEL,
+        1.0f,
+        buf_ln,
+        W.wte_t,
+        0.0f,
+        buf_logits
+    );
+    
 
-        cudaMemcpy(
-            h_tokens,
-            d_tokens,
-            batch_size * sizeof(int),
-            cudaMemcpyDeviceToHost
-        );
-    }
+    Kernel::argmax_gpu(
+        buf_logits,
+        d_tokens,
+        batch_size,
+        C::GPT2_VOCAB_SIZE
+    );
+    cudaMemcpy(
+        h_tokens,
+        d_tokens,
+        batch_size * sizeof(int),
+        cudaMemcpyDeviceToHost
+    );
+
 
     std::vector<Rt::Response> result;
     result.reserve(batch_size);
 
-    {
-        mini_llm::profiling::ScopedStageTimer timer(
-            "MINI_LLM_PROFILE_DECODE",
-            "decode_top",
-            batch_size,
-            static_cast<std::size_t>(batch_size),
-            -1,
-            "make_response"
-        );
-
-        for (int i = 0; i < batch_size; i++) {
-            bool done = h_tokens[i] == C::GPT2_EOS_TOKEN_ID;
-            result.emplace_back(reqs[i]->request_id, h_tokens[i], done);
-        }
+    
+    for (int i = 0; i < batch_size; i++) {
+        bool done = h_tokens[i] == C::GPT2_EOS_TOKEN_ID;
+        result.emplace_back(reqs[i]->request_id, h_tokens[i], done);
     }
+
 
     return result;
 }
